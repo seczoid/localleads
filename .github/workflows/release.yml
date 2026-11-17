@@ -69,10 +69,15 @@ jobs:
             runner: macos-15-intel
           - target: aarch64-apple-darwin
             runner: macos-15
-          # Windows on ARM runs this build through its x64 emulation.
-          # (A native ARM64 build fails in btls-sys and rquickjs-sys.)
           - target: x86_64-pc-windows-msvc
             runner: windows-2025
+          # Cross-compiled on x64 Windows: on a native ARM64 runner BoringSSL
+          # (btls-sys) picks up x86_64 assembly and fails to link. When
+          # cross-compiling it builds without assembly. Can't be run here, so
+          # no smoke test.
+          - target: aarch64-pc-windows-msvc
+            runner: windows-2025
+            cross: true
     runs-on: ${{ matrix.runner }}
     container: ${{ matrix.container }}
     steps:
@@ -93,6 +98,8 @@ jobs:
         run: |
           choco install nasm --no-progress -y
           "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append
+          # bindgen (rquickjs-sys on ARM64) loads libclang from the runner's LLVM.
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
           rustup set profile minimal
           rustup toolchain install stable --target ${{ matrix.target }}
 
@@ -115,6 +122,7 @@ jobs:
         run: cargo build --release --locked --features "$FEATURES" --target ${{ matrix.target }}
 
       - name: Smoke test
+        if: ${{ !matrix.cross }}
         shell: bash
         run: |
           bin=target/${{ matrix.target }}/release/localleads
@@ -147,7 +155,8 @@ jobs:
     name: Publish
     needs: [check, build]
     # Publishes what built, so one failing platform doesn't hold up the rest.
-    if: ${{ !cancelled() && needs.check.result == 'success' }}
+    # Only main and version tags publish; a manual run on another branch just builds.
+    if: ${{ !cancelled() && needs.check.result == 'success' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}
@@ -194,7 +203,8 @@ jobs:
           | Linux ARM64 (glibc 2.28+) | \`localleads-aarch64-unknown-linux-gnu.tar.gz\` |
           | macOS Apple silicon | \`localleads-aarch64-apple-darwin.tar.gz\` |
           | macOS Intel | \`localleads-x86_64-apple-darwin.tar.gz\` |
-          | Windows (x86_64; ARM64 through emulation) | \`localleads-x86_64-pc-windows-msvc.zip\` |
+          | Windows x86_64 | \`localleads-x86_64-pc-windows-msvc.zip\` |
+          | Windows ARM64 | \`localleads-aarch64-pc-windows-msvc.zip\` |
 
           Check a download with \`sha256sum -c SHA256SUMS --ignore-missing\`. Docker image: \`ghcr.io/$GITHUB_REPOSITORY\`.
           EOF

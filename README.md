@@ -222,7 +222,7 @@ Supported: Linux with systemd and glibc 2.28+ (Ubuntu 20.04+, Debian 10+, RHEL/R
 
 ### Download a binary
 
-Every release has ready-to-run builds on the **[Releases page](https://github.com/seczoid/localleads/releases)**: Linux (x86_64, ARM64), macOS (Apple silicon, Intel) and Windows (x86_64, which also runs on Windows on ARM), with a `SHA256SUMS` file. Unpack it and run:
+Every release has ready-to-run builds on the **[Releases page](https://github.com/seczoid/localleads/releases)**: Linux (x86_64, ARM64), macOS (Apple silicon, Intel) and Windows (x86_64, ARM64), with a `SHA256SUMS` file. Unpack it and run:
 
 ```bash
 ./localleads --open          # Windows: localleads.exe --open
@@ -376,7 +376,7 @@ Pull requests are welcome. For larger changes, please open an issue first to tal
 
 ### Releasing
 
-Every push to `main` rebuilds the [edge pre-release](https://github.com/seczoid/localleads/releases/tag/edge) for all five platforms. To cut a real release, bump `version` in `Cargo.toml`, commit, and push a matching tag:
+Every push to `main` rebuilds the [edge pre-release](https://github.com/seczoid/localleads/releases/tag/edge) for all six platforms. To cut a real release, bump `version` in `Cargo.toml`, commit, and push a matching tag:
 
 ```bash
 git tag v0.2.0
