@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block heading %}<a class="crumb" href="/leads">Leads</a><h1>{{ title }}</h1>{% endblock %}
+{% block actions %}
+{% if !job_id.is_empty() %}<a class="btn" href="/jobs/{{ job_id }}">Search details</a>{% endif %}
+<div class="menu-wrap" x-data="{ open: false }" @click.outside="open = false">
+  <button type="button" class="btn primary" @click="open = !open">Export ▾</button>
+  <div class="menu right" x-show="open" x-cloak x-transition.opacity>
+    <a :href="'/leads/export.csv?' + new URLSearchParams(new FormData(document.getElementById('lead-filters'))).toString()" hx-boost="false">Download CSV</a>
+    <a :href="'/leads/export.json?' + new URLSearchParams(new FormData(document.getElementById('lead-filters'))).toString()" hx-boost="false">Download JSON</a>
+    <button hx-post="/leads/export-disk" hx-include="#lead-filters">Save CSV + JSON beside the database</button>
+  </div>
+</div>
+{% endblock %}
+{% block content %}
+{% if !subtitle.is_empty() %}<p class="page-sub muted">{{ subtitle }}</p>{% endif %}
+<div class="browse" x-data="{ filtersOpen: false }">
+  {# The form holds the search box and facets; the table sits beside it so
+     facet swaps never touch it. It reloads after each swap (see app.js). #}
+  <form id="lead-filters" class="browse-form" hx-get="/partials/leads/browse" hx-target="#facets" hx-swap="outerHTML"
+        hx-trigger="change, input changed delay:300ms from:#lead-search, leads-changed from:body"
+        hx-sync="this:replace" hx-disinherit="*" @submit.prevent>
+    <div class="browse-bar">
+      <input type="search" id="lead-search" name="q" value="{{ q }}" placeholder="Search name, category, address, phone, website…" autocomplete="off">
+      <button type="button" class="btn filters-toggle" @click="filtersOpen = !filtersOpen" :aria-expanded="filtersOpen" x-text="filtersOpen ? 'Hide filters' : 'Filters'">Filters</button>
+    </div>
+    {{ body|safe }}
+  </form>
+  <section class="card results" x-data="leadTable()">
+    {# Plain form posts download the exports; Delete goes through htmx. #}
+    <form id="lead-bulk" class="bulkbar has-selection" method="post" action="/leads/bulk" hx-boost="false"
+          x-show="count() > 0" x-cloak x-transition.opacity
+          @submit="$el.elements.filters.value = filterQs(); $el.elements.sort.value = tableSort()"
+          @htmx:config-request="$event.detail.parameters.filters = filterQs(); $event.detail.parameters.sort = tableSort()">
+      <template x-for="id in (allMatching ? [] : ids())" :key="id"><input type="hidden" name="ids" :value="id"></template>
+      <input type="hidden" name="all_matching" :value="allMatching ? '1' : ''">
+      <input type="hidden" name="filters" value="">
+      <input type="hidden" name="sort" value="">
+      <span class="sel-count" x-text="count().toLocaleString() + ' selected'"></span>
+      <button type="button" class="link" x-show="!allMatching && matching > selected.size" @click="allMatching = true" x-text="'Select all ' + matching.toLocaleString()"></button>
+      <button type="button" class="link quiet" @click="clear()">Clear</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn sm" hx-post="/leads/bulk" hx-vals='{"action": "enrich"}'
+              :hx-confirm="'Find emails for ' + count().toLocaleString() + (count() === 1 ? ' lead' : ' leads') + '? Each website is read and each address checked with its mail server, in the background.'">Find emails</button>
+      <button class="btn sm primary" name="action" value="csv">Export CSV</button>
+      <button class="btn sm" name="action" value="json">Export JSON</button>
+      <button type="button" class="btn sm danger" hx-post="/leads/bulk" hx-vals='{"action": "delete"}'
+              :hx-confirm="'Delete ' + count().toLocaleString() + (count() === 1 ? ' lead' : ' leads') + '? They are removed from every search that found them.'">Delete</button>
+    </form>
+    <table id="leads-dt" class="table hover leads-table" data-leads-table hx-history="false" data-form="lead-filters">
+      <thead><tr>
+        <th class="w-check"><input type="checkbox" aria-label="Select this page" :checked="pageSelected()" @change="togglePage($event.target.checked)"></th>
+        <th class="num w-num">#</th>
+        <th>Business</th><th>Location</th><th>Phone</th><th>Website</th><th>Email</th><th class="num">Rating</th><th class="num">Added</th>
+      </tr></thead>
+    </table>
+  </section>
+</div>
+{% endblock %}

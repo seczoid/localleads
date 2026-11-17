@@ -1,0 +1,31 @@
+<div class="modal-backdrop" x-data @keydown.escape.window="$root.remove()" @click.self="$root.remove()">
+  <div class="modal wide" role="dialog" aria-modal="true">
+    <header class="modal-head">
+      <div><h2 class="mono">{{ proxy.masked }}</h2><p class="muted">{{ proxy.protocol }} · {% if proxy.enabled %}enabled{% else %}disabled{% endif %} · {{ proxy.failures }} consecutive failures{% if !proxy.groups.is_empty() %} · {{ proxy.groups }}{% endif %}</p></div>
+      <button type="button" class="icon-btn" @click="$root.remove()" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg></button>
+    </header>
+    <div class="modal-body">
+      {% if checks.is_empty() %}
+        <div class="empty"><p>This proxy has not been checked yet.</p></div>
+      {% else %}
+      <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Checked</th><th>Status</th><th class="num">Latency</th><th>Exit IP</th><th>Error</th></tr></thead>
+        <tbody>
+        {% for check in checks %}
+          <tr>
+            <td class="small nowrap">{{ check.time }}</td>
+            <td><span class="badge {{ check.status_class }}">{{ check.status }}</span></td>
+            <td class="num small">{{ check.latency }}</td>
+            <td class="mono small">{{ check.exit_ip }}</td>
+            <td class="small error-text" title="{{ check.endpoint }}">{{ check.error }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      {% endif %}
+    </div>
+    <footer class="modal-foot"><span class="spacer"></span><button type="button" class="btn" @click="$root.remove()">Close</button></footer>
+  </div>
+</div>

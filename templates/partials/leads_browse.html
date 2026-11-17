@@ -1,0 +1,67 @@
+<aside id="facets" class="facets" aria-label="Filters" :class="{ open: filtersOpen }">
+  {% for group in groups %}
+  {% if !group.options.is_empty() %}
+  <fieldset class="facet" x-data="{ more: false }">
+    <legend>{{ group.title }}</legend>
+    {% for option in group.options %}
+    <label class="facet-option{% if option.checked %} on{% endif %}"{% if option.extra %} x-show="more" x-cloak{% endif %}>
+      <input type="checkbox" name="{{ group.param }}" value="{{ option.value }}" {% if option.checked %}checked{% endif %}>
+      <span class="facet-label" title="{{ option.label }}">{{ option.label }}</span>
+      <span class="facet-count">{{ option.count }}</span>
+    </label>
+    {% endfor %}
+    {% if group.extra > 0 %}
+    <button type="button" class="facet-more" @click="more = !more" x-text="more ? 'Show fewer' : 'Show {{ group.extra }} more'">Show {{ group.extra }} more</button>
+    {% endif %}
+  </fieldset>
+  {% endif %}
+  {% endfor %}
+
+  <fieldset class="facet">
+    <legend>Contact</legend>
+    <label class="facet-option{% if has_phone %} on{% endif %}">
+      <input type="checkbox" name="has_phone" value="1" {% if has_phone %}checked{% endif %}>
+      <span class="facet-label">Has phone</span>
+      <span class="facet-count">{{ phone_count }}</span>
+    </label>
+    {% for option in website %}
+    <label class="facet-option{% if option.checked %} on{% endif %}">
+      <input type="radio" name="website" value="{{ option.value }}" {% if option.checked %}checked{% endif %}>
+      <span class="facet-label">{{ option.label }}</span>
+      <span class="facet-count">{{ option.count }}</span>
+    </label>
+    {% endfor %}
+  </fieldset>
+
+  <fieldset class="facet">
+    <legend>Email</legend>
+    {% for option in email %}
+    <label class="facet-option{% if option.checked %} on{% endif %}">
+      <input type="radio" name="email" value="{{ option.value }}" {% if option.checked %}checked{% endif %}>
+      <span class="facet-label">{{ option.label }}</span>
+      <span class="facet-count">{{ option.count }}</span>
+    </label>
+    {% endfor %}
+  </fieldset>
+
+  <fieldset class="facet">
+    <legend>Rating</legend>
+    {% for option in rating %}
+    <label class="facet-option{% if option.checked %} on{% endif %}">
+      <input type="radio" name="min_rating" value="{{ option.value }}" {% if option.checked %}checked{% endif %}>
+      <span class="facet-label">{% if !option.value.is_empty() %}★ {% endif %}{{ option.label }}</span>
+      <span class="facet-count">{{ option.count }}</span>
+    </label>
+    {% endfor %}
+  </fieldset>
+</aside>
+
+<header id="results-head" class="results-head"{% if oob %} hx-swap-oob="true"{% endif %}>
+  <div class="results-count"><b>{{ total }}</b> {% if total == "1" %}lead{% else %}leads{% endif %}</div>
+  {% if filtered %}
+  <div class="active-filters">
+    {% for chip in chips %}<a class="filter-chip" href="{{ chip.href }}" aria-label="Remove filter {{ chip.label }}">{{ chip.label }}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg></a>{% endfor %}
+    <a class="link quiet small" href="/leads/browse">Clear all</a>
+  </div>
+  {% endif %}
+</header>

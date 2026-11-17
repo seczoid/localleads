@@ -1,0 +1,15 @@
+/target
+.env
+*.log
+*.sqlite
+*.sqlite-*
+*.duckdb*
+.DS_Store
+
+# Local data and private work that isn't part of the project
+/.claude/
+/us-cleaning-prospects-*/
+/curl-scrape-result*.csv
+/scripts/
+/docs/sevenhoursback-icp.md
+localleads-export-*

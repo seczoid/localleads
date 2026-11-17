@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}New search{% endblock %}
+{% block heading %}<h1>New search</h1>{% if !from_name.is_empty() %}<span class="muted">based on “{{ from_name }}”</span>{% endif %}{% endblock %}
+{% block content %}
+<form class="job-form" id="job-form" hx-post="/jobs" hx-disabled-elt="#job-submit"
+      x-data="jobForm({{ filters_json }}, {{ collect_all }})"
+      @htmx:response-error="error = $event.detail.xhr.responseText" @htmx:before-request="if ($event.target.id === 'job-form') error = ''">
+  <div class="form-main">
+    <section class="card">
+      <header class="card-head"><h2>What are you looking for?</h2></header>
+      <label class="field">
+        <span>Business types or keywords <em>one per line</em></span>
+        <textarea name="queries" rows="3" required placeholder="hvac&#10;plumber&#10;roofing contractor">{{ form.queries }}</textarea>
+      </label>
+    </section>
+
+    <section class="card">
+      <header class="card-head"><h2>Where?</h2></header>
+      <div class="region-picker" x-data="regionPicker({{ picker }}, {% if form.location_mode == "custom" %}true{% else %}false{% endif %})">
+        <div class="picker-top">
+          <select name="location_country" x-model="country" @change="loadCountry()" :disabled="custom" aria-label="Country">
+            {% for opt in countries %}<option value="{{ opt.value }}" {% if opt.selected %}selected{% endif %}>{{ opt.label }}</option>{% endfor %}
+          </select>
+          <div class="picker-box" :class="custom && 'disabled'" @click="$refs.search.focus()">
+            <template x-for="chip in chips()" :key="chip.key">
+              <span class="filter-chip">
+                <span x-text="chip.label"></span>
+                <button type="button" x-show="chip.removable" @click.stop="chip.remove()" :aria-label="'Remove ' + chip.label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg></button>
+              </span>
+            </template>
+            <input type="search" x-ref="search" class="picker-search" x-model="q" @input.debounce.250ms="search()" @keydown.enter.prevent
+                   :placeholder="expandable ? 'Search states and cities…' : 'Search states…'" :disabled="custom" aria-label="Search places">
+          </div>
+        </div>
+
+        <div class="picker-panel" x-show="!custom">
+          <div class="picker-results" x-show="results.length" x-cloak>
+            <div class="picker-label">Cities</div>
+            <template x-for="c in results" :key="c.label">
+              <label class="check picker-row"><input type="checkbox" :checked="cityPicked(stateOf(c), c)" @change="toggleCity(stateOf(c), c)">
+                <span x-text="c.name + ', ' + c.state"></span><span class="muted small" x-text="zipText(c)"></span></label>
+            </template>
+            <div class="picker-label">States</div>
+          </div>
+          <ul class="picker-tree">
+            <template x-for="s in visibleStates()" :key="s.name">
+              <li>
+                <div class="picker-row">
+                  <button type="button" class="picker-toggle" x-show="expandable" @click="expand(s)" :aria-label="(s.open ? 'Hide' : 'Show') + ' cities in ' + s.name" x-text="s.open ? '−' : '+'"></button>
+                  <label class="check"><input type="checkbox" :checked="s.full" x-effect="$el.indeterminate = !s.full && s.picked.size > 0" @change="toggleState(s)"><span x-text="s.name"></span></label>
+                  <span class="muted small" x-show="!s.full && s.picked.size" x-text="s.picked.size + (s.picked.size === 1 ? ' city' : ' cities')"></span>
+                </div>
+                <ul class="picker-cities" x-show="s.open">
+                  <li class="muted small" x-show="s.loading">Loading cities…</li>
+                  <template x-for="c in (s.cities || [])" :key="c.label">
+                    <li><label class="check"><input type="checkbox" :checked="cityPicked(s, c)" @change="toggleCity(s, c)"><span x-text="c.name"></span><span class="muted small" x-text="zipText(c)"></span></label></li>
+                  </template>
+                </ul>
+              </li>
+            </template>
+          </ul>
+          <div class="picker-foot">
+            <button type="button" class="link" @click="selectAll()">Select all</button>
+            <button type="button" class="link quiet" @click="clearAll()">Clear all</button>
+            <span class="spacer"></span>
+            <span class="muted small" x-text="summary()"></span>
+          </div>
+        </div>
+
+        <label class="check"><input type="checkbox" x-model="custom" @change="changed()"> Custom places instead</label>
+        <label class="field" x-show="custom" x-cloak>
+          <span>Places <em>one per line: cities, ZIP codes, neighborhoods, or coordinates</em></span>
+          <textarea name="custom_locations" rows="4" placeholder="Austin, TX&#10;Brooklyn, New York&#10;10001">{{ form.custom_locations }}</textarea>
+        </label>
+
+        <input type="hidden" name="location_mode" :value="custom ? 'custom' : (allPicked() ? 'all' : 'states')">
+        <template x-if="!custom && !allPicked()">
+          <div hidden>
+            <template x-for="name in fullStates()" :key="name"><input type="hidden" name="states" :value="name"></template>
+            <template x-for="label in pickedCities()" :key="label"><input type="hidden" name="cities" :value="label"></template>
+          </div>
+        </template>
+        <p class="hint" x-show="!custom">Every selected area is searched ZIP code by ZIP code, busiest areas first, so you get as many results as Google Maps has. Cities and ZIP codes are available for the United States; other countries are searched state by state.</p>
+      </div>
+    </section>
+
+    <section class="card">
+      <header class="card-head"><h2>How many leads?</h2></header>
+      <div class="row-2">
+        <label class="field" :class="collectAll && 'disabled'"><span>Maximum results</span><input type="number" min="1" max="10000000" name="total_limit" value="{{ form.total_limit }}" :disabled="collectAll"></label>
+        <label class="check end"><input type="checkbox" name="collect_all" x-model="collectAll"> No limit: get everything available</label>
+      </div>
+    </section>
+
+    <section class="card">
+      <header class="card-head"><h2>Enrich each lead</h2></header>
+      <label class="check"><input type="checkbox" name="find_emails" {% if form.find_emails.is_some() %}checked{% endif %}> Find emails on the lead's website, plus socials, phones and site details</label>
+      <label class="check"><input type="checkbox" name="place_details" {% if form.place_details.is_some() %}checked{% endif %}> Open the Google place page: reviews per star, review topics, owner, photos</label>
+      {% if can_verify %}<label class="check"><input type="checkbox" name="verify_emails" {% if form.verify_emails.is_some() %}checked{% endif %}> Verify emails with their mail servers (slower; found emails show up first either way)</label>{% endif %}
+      <p class="hint">Runs alongside the search, with no AI: pages are read and addresses pulled out by fixed rules. Websites are read directly; Google goes through the search's proxies.</p>
+    </section>
+
+    <section class="card">
+      <header class="card-head"><h2>Proxies</h2></header>
+      <div class="row-2">
+        <label class="field">
+          <span>Proxy group</span>
+          <select name="proxy_group_id">{% for opt in groups %}<option value="{{ opt.value }}" {% if opt.selected %}selected{% endif %}>{{ opt.label }}</option>{% endfor %}</select>
+        </label>
+        <label class="field"><span>Requests at once <em>1–{{ max_concurrency }}</em></span><input type="number" min="1" max="{{ max_concurrency }}" name="concurrency" value="{{ form.concurrency }}"></label>
+      </div>
+      <p class="hint">Requests rotate through the group's healthy proxies, including ones added while the search runs. Without proxies, keep it around 10 so Google doesn't start refusing requests; with a few hundred proxies, 100–300 is much faster.</p>
+    </section>
+
+    <details class="card">
+      <summary class="card-head"><h2>Advanced</h2><span class="muted small">Name, filters, language, retries, output</span></summary>
+      <label class="field">
+        <span>Search name</span>
+        <input name="job_name" value="{{ form.job_name }}" maxlength="200" placeholder="Named automatically, e.g. “Hvac in New York”">
+      </label>
+      <div class="row-3">
+        <label class="field">
+          <span>Search mode</span>
+          <select name="mode">{% for opt in modes %}<option value="{{ opt.value }}" {% if opt.selected %}selected{% endif %}>{{ opt.label }}</option>{% endfor %}</select>
+        </label>
+        <label class="field"><span>Language</span><input name="language" value="{{ form.language }}" maxlength="10" placeholder="en"></label>
+        <label class="field"><span>Region <em>blank = from country</em></span><input name="region" value="{{ form.region }}" maxlength="3" placeholder="us"></label>
+      </div>
+      <label class="check"><input type="checkbox" name="exact_match" {% if exact_match %}checked{% endif %}> Exact-match keywords (wrap each in quotes)</label>
+      <div class="row-3">
+        <label class="field"><span>Retries per request</span><input type="number" min="0" max="10" name="max_retries" value="{{ form.max_retries }}"></label>
+        <label class="field"><span>Results per area <em>blank = all</em></span><input type="number" min="0" max="1000" name="per_query_limit" value="{{ form.per_query_limit }}" placeholder="All"></label>
+        <label class="field"><span>Skip first results per area</span><input type="number" min="0" max="1000" name="start_at" value="{{ form.start_at }}"></label>
+      </div>
+      <label class="check"><input type="checkbox" name="require_proxy" {% if require_proxy %}checked{% endif %}> Require a healthy proxy for every request</label>
+      <label class="check"><input type="checkbox" name="allow_direct" {% if allow_direct %}checked{% endif %}> Fall back to direct requests when no proxy is available</label>
+
+      <div class="field">
+        <span>Filters</span>
+        <p class="hint" x-show="filters.length === 0">Keep only leads that match every filter, for example rating ≥ 4 or website is not empty.</p>
+        <template x-for="(f, i) in filters" :key="i">
+          <div class="filter-row">
+            <select x-model="f.field">
+              {% for field in filter_fields %}<option value="{{ field }}">{{ field }}</option>{% endfor %}
+            </select>
+            <select x-model="f.op">
+              {% for op in filter_ops %}<option value="{{ op }}">{{ op }}</option>{% endfor %}
+            </select>
+            <input x-model="f.value" placeholder="value" :disabled="f.op === 'is_empty' || f.op === 'not_empty'">
+            <input type="hidden" name="filters" :value="serialize(f)">
+            <button type="button" class="icon-btn" @click="filters.splice(i, 1); $nextTick(() => $el.closest('form').dispatchEvent(new Event('change', { bubbles: true })))" aria-label="Remove filter"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg></button>
+          </div>
+        </template>
+        <div><button type="button" class="btn sm" @click="addFilter()">Add filter</button></div>
+      </div>
+
+      <div class="field">
+        <span>Output fields</span>
+        <div class="chips">
+          {% for field in output_fields %}
+          <label class="chip"><input type="checkbox" name="output_fields" value="{{ field.value }}" {% if field.checked %}checked{% endif %}><span>{{ field.value }}</span></label>
+          {% endfor %}
+        </div>
+        <p class="hint">CSV exports always use the full 120-column schema; this list is stored with the search.</p>
+      </div>
+      <label class="field">
+        <span>Enrichments <em>separated by |</em></span>
+        <input name="enrichments" value="{{ form.enrichments }}" placeholder="kept with the search; no external enrichment service is called">
+      </label>
+      <label class="field">
+        <span>Tags <em>separated by commas</em></span>
+        <input name="tags" value="{{ form.tags }}" placeholder="q4-outreach, hvac">
+      </label>
+    </details>
+  </div>
+
+  <aside class="form-side">
+    <div class="card sticky">
+      <header class="card-head"><h2>Summary</h2></header>
+      <div id="job-preview" hx-post="/jobs/preview" hx-trigger="load, change from:#job-form, input from:#job-form delay:500ms" hx-include="#job-form">
+        <p class="muted">Calculating…</p>
+      </div>
+      <div class="callout bad" x-show="error" x-text="error" x-cloak></div>
+      <button type="submit" id="job-submit" class="btn primary block lg">Start search</button>
+      <p class="hint">Leads are saved as they arrive, so stopping a search keeps everything collected so far.</p>
+    </div>
+  </aside>
+</form>
+{% endblock %}

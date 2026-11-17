@@ -1,0 +1,8 @@
+{% if ready %}
+<div class="preview">
+  <div class="preview-big"><span class="stat-value">{{ goal }}</span><span class="stat-label">{{ goal_label }}</span></div>
+  <p class="preview-what"><b>{{ what }}</b> in {{ place }}</p>
+  <p class="small muted">{{ coverage }}</p>
+</div>
+{% endif %}
+{% if !error.is_empty() %}<div class="callout warn">{{ error }}</div>{% endif %}

@@ -1,0 +1,61 @@
+# LocalLeads behind Caddy, which gets and renews HTTPS certificates itself.
+#
+#   cp .env.example .env      # set DOMAIN
+#   docker compose up -d
+#   docker compose logs localleads   # shows the one-time setup code
+#
+# See docs/SELF_HOSTING.md.
+name: localleads
+
+services:
+  localleads:
+    build: .
+    image: ${LOCALLEADS_IMAGE:-localleads:local}
+    restart: unless-stopped
+    environment:
+      LOCALLEADS_PUBLIC_URL: ${PUBLIC_URL:-https://${DOMAIN:?Set DOMAIN in .env}}
+      LOCALLEADS_BEHIND_PROXY: "true"
+      LOCALLEADS_SETUP_CODE: ${LOCALLEADS_SETUP_CODE:-}
+    volumes:
+      - localleads-data:/data
+    # Reachable only through Caddy, never published directly.
+    expose:
+      - "7878"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # Lets running searches stop cleanly; they resume as "interrupted".
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      localleads:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+volumes:
+  localleads-data:
+  caddy-data:
+  caddy-config:

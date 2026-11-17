@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}{{ job.name }}{% endblock %}
+{% block heading %}<a class="crumb" href="/jobs">Searches</a><h1>{{ job.name }}</h1>{% endblock %}
+{% block actions %}
+  <a class="btn" href="/leads/export.csv?source={{ job.id }}" hx-boost="false">Export CSV</a>
+  <a class="btn" href="/leads/export.json?source={{ job.id }}" hx-boost="false">JSON</a>
+  <a class="btn" href="/jobs/new?from={{ job.id }}">Duplicate</a>
+{% endblock %}
+{% block content %}
+<div id="job-live" hx-get="/jobs/{{ job.id }}/live" hx-trigger="jobs-changed from:body" hx-swap="innerHTML">
+  {% include "partials/job_live.html" %}
+</div>
+
+<div class="grid-2 align-start">
+  <section class="card">
+    <header class="card-head"><h2>Configuration</h2></header>
+    <dl class="kv">
+      {% for row in config %}<dt>{{ row.0 }}</dt><dd>{{ row.1 }}</dd>{% endfor %}
+    </dl>
+  </section>
+  <section class="card">
+    <header class="card-head"><h2>Leads from this search</h2><a class="link" href="/leads/browse?source={{ job.id }}">Open lead list →</a></header>
+    <table class="table hover leads-table" data-leads-table hx-history="false" data-compact="1" data-params="source={{ job.id }}" data-live="1">
+      <thead><tr><th>Business</th><th>Location</th><th>Phone</th><th>Website</th><th>Email</th><th class="num">Rating</th></tr></thead>
+    </table>
+  </section>
+</div>
+{% endblock %}

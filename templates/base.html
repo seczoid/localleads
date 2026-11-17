@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}LocalLeads{% endblock %} · LocalLeads</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <script>
+    try { var t = localStorage.getItem('ll-theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
+  <link rel="preload" href="/static/fonts/plus-jakarta-sans.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/static/app.css">
+  <script defer src="/static/vendor/htmx.min.js"></script>
+  <script defer src="/static/vendor/jquery.min.js"></script>
+  <script defer src="/static/vendor/datatables.min.js"></script>
+  <script defer src="/static/app.js"></script>
+  <script defer src="/static/vendor/alpine.min.js"></script>
+</head>
+<body hx-boost="true">
+  <div class="shell" x-data="{ nav: false }">
+    <aside class="sidebar" :class="nav && 'open'">
+      <a class="brand" href="/">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7Zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5Z"/></svg>
+        <span>LocalLeads</span>
+      </a>
+      <nav class="nav">
+        <a href="/" class="{% if nav == "dashboard" %}active{% endif %}">
+          <svg viewBox="0 0 24 24"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/></svg>Dashboard</a>
+        <a href="/jobs/new" class="{% if nav == "new" %}active{% endif %}">
+          <svg viewBox="0 0 24 24"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z"/></svg>New search</a>
+        <a href="/jobs" class="{% if nav == "jobs" %}active{% endif %}">
+          <svg viewBox="0 0 24 24"><path d="M4 6h16v2H4V6Zm0 5h16v2H4v-2Zm0 5h10v2H4v-2Z"/></svg>Searches</a>
+        <a href="/leads" class="{% if nav == "leads" %}active{% endif %}">
+          <svg viewBox="0 0 24 24"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0 2c-4 0-8 2-8 5v1h16v-1c0-3-4-5-8-5Z"/></svg>Leads</a>
+        <a href="/proxies" class="{% if nav == "proxies" %}active{% endif %}">
+          <svg viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 4.5 3.4 8.6 8 9 4.6-.4 8-4.5 8-9V6l-8-3Zm-1 13-3.5-3.5 1.4-1.4 2.1 2.1 4.6-4.6 1.4 1.4L11 16Z"/></svg>Proxies</a>
+        <a href="/agents" class="{% if nav == "mcp" %}active{% endif %}">
+          <svg viewBox="0 0 24 24"><path d="M9 3v4H7a2 2 0 0 0-2 2v3a6 6 0 0 0 5 5.9V21h4v-3.1A6 6 0 0 0 19 12V9a2 2 0 0 0-2-2h-2V3h-2v4h-2V3H9Zm-2 6h10v3a4 4 0 0 1-4 4h-2a4 4 0 0 1-4-4V9Z"/></svg>MCP</a>
+        <a href="/docs" class="{% if nav == "docs" %}active{% endif %}">
+          <svg viewBox="0 0 24 24"><path d="M6 2h9l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm8 1.5V8h4.5L14 3.5ZM7 11v2h10v-2H7Zm0 4v2h10v-2H7Zm0-8v2h5V7H7Z"/></svg>Docs</a>
+        <a href="/settings" class="{% if nav == "settings" %}active{% endif %}">
+          <svg viewBox="0 0 24 24"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.3 2.9a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1c.5.4 1.1.7 1.7 1L11 21h4l.3-2.9c.6-.3 1.2-.6 1.7-1l2.5 1 2-3.5-2.1-1.6ZM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z"/></svg>Settings</a>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="side-box" x-data>
+          <div class="side-label">Live updates</div>
+          <span class="conn" :class="$store.conn.online ? 'on' : 'off'"
+                x-text="$store.conn.online ? 'Connected' : 'Reconnecting…'"></span>
+        </div>
+        <button type="button" class="side-theme" @click="$store.theme.toggle()">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9c0-.5 0-1-.1-1.4A5.5 5.5 0 0 1 13.4 3.1 9 9 0 0 0 12 3Z"/></svg>
+          <span>Toggle theme</span>
+        </button>
+        <form method="post" action="/logout" hx-boost="false" class="side-signout">
+          <button type="submit" class="side-theme">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5v-2H5V5h5V3Zm6.6 4.4-1.4 1.4 2.2 2.2H9v2h8.4l-2.2 2.2 1.4 1.4L21.2 12l-4.6-4.6Z"/></svg>
+            <span>Sign out</span>
+          </button>
+        </form>
+      </div>
+    </aside>
+    <div class="scrim" x-show="nav" x-cloak @click="nav = false"></div>
+    <main class="main">
+      <header class="topbar">
+        <button type="button" class="icon-btn hamburger" @click="nav = !nav" aria-label="Menu">
+          <svg viewBox="0 0 24 24"><path d="M3 6h18v2H3V6Zm0 5h18v2H3v-2Zm0 5h18v2H3v-2Z"/></svg>
+        </button>
+        <div class="topbar-title">{% block heading %}{% endblock %}</div>
+        <div class="topbar-actions">{% block actions %}{% endblock %}</div>
+      </header>
+      <div class="content">
+        {% block content %}{% endblock %}
+      </div>
+    </main>
+  </div>
+
+  <div id="modal-root"></div>
+
+  <div class="toasts" x-data aria-live="polite">
+    <template x-for="toast in $store.toasts.items" :key="toast.id">
+      <div class="toast" :class="toast.level" @click="$store.toasts.dismiss(toast.id)">
+        <span x-text="toast.message"></span>
+      </div>
+    </template>
+  </div>
+</body>
+</html>

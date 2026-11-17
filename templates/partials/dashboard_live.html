@@ -1,0 +1,83 @@
+<section class="stats">
+  <div class="stat">
+    <span class="stat-label">Leads</span>
+    <span class="stat-value">{{ stats.leads }}</span>
+    <span class="stat-sub">{{ stats.phone_pct }}% with phone · {{ stats.website_pct }}% with website</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Searches</span>
+    <span class="stat-value">{{ stats.jobs }}</span>
+    <span class="stat-sub">{% if stats.active_jobs == "0" %}None running{% else %}<span class="pulse"></span>{{ stats.active_jobs }} active{% endif %}</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Proxies</span>
+    <span class="stat-value">{{ stats.proxies }}</span>
+    <span class="stat-sub">{{ stats.healthy_proxies }} healthy ({{ stats.healthy_pct }}%)</span>
+  </div>
+  <div class="stat">
+    <span class="stat-label">Proxy health</span>
+    <div class="healthbar" title="healthy {{ health.healthy }} · slow {{ health.slow }} · failed {{ health.failed }} · unchecked {{ health.unknown }}">
+      <i class="ok" style="width: {{ health.healthy_pct }}%"></i><i class="warn" style="width: {{ health.slow_pct }}%"></i><i class="bad" style="width: {{ health.failed_pct }}%"></i><i class="muted" style="width: {{ health.unknown_pct }}%"></i>
+    </div>
+    <span class="stat-sub">{{ health.healthy }} ok · {{ health.slow }} slow · {{ health.failed }} failed · {{ health.unknown }} unchecked</span>
+  </div>
+</section>
+
+<div class="grid-2">
+  <section class="card">
+    <header class="card-head"><h2>Recent searches</h2><a href="/jobs" class="link">All searches →</a></header>
+    {% if jobs.is_empty() %}
+      <div class="empty">
+        <p>No searches yet.</p>
+        <a class="btn primary" href="/jobs/new">Start your first search</a>
+      </div>
+    {% else %}
+      <ul class="job-list">
+        {% for job in jobs %}
+        <li>
+          <a href="/jobs/{{ job.id }}" class="job-line">
+            <span class="job-name">{{ job.name }}</span>
+            <span class="badge {{ job.status_class }}">{{ job.status }}</span>
+          </a>
+          <div class="job-meta">
+            <div class="progress {% if job.active && !job.has_target %}indeterminate{% endif %}"><i style="width: {{ job.pct }}%"></i></div>
+            <span class="num">{{ job.collected }} / {{ job.total_label }}</span>
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <header class="card-head"><h2>Latest leads</h2><a href="/leads" class="link">All leads →</a></header>
+    {% if leads.is_empty() %}
+      <div class="empty"><p>Leads appear here as searches collect them.</p></div>
+    {% else %}
+      <ul class="lead-list">
+        {% for lead in leads %}
+        <li>
+          <button type="button" class="lead-line" hx-get="/leads/{{ lead.id }}" hx-target="#modal-root">
+            <span class="lead-name">{{ lead.name }}</span>
+            <span class="lead-sub">{{ lead.category }}{% if !lead.category.is_empty() && !lead.address.is_empty() %} · {% endif %}{{ lead.address }}</span>
+          </button>
+          {% if !lead.rating.is_empty() %}<span class="rating">★ {{ lead.rating }}</span>{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  </section>
+</div>
+
+<section class="card">
+  <header class="card-head"><h2>Activity</h2><a href="/settings#activity" class="link">Full log →</a></header>
+  {% if notices.is_empty() %}
+    <div class="empty"><p>Search, import, and proxy-check activity since the server started shows up here.</p></div>
+  {% else %}
+    <ul class="activity">
+      {% for notice in notices %}
+      <li class="{{ notice.level }}"><time>{{ notice.at }}</time><span>{{ notice.message }}</span></li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</section>

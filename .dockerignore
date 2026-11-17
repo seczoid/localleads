@@ -1,0 +1,19 @@
+# Only the sources the build needs go into the image's build context.
+target/
+.git/
+.github/
+.claude/
+.env
+.env.*
+!.env.example
+*.log
+*.csv
+*.sqlite
+*.sqlite-*
+us-cleaning-prospects-*/
+scripts/
+tests/
+docs/
+Dockerfile
+compose.yaml
+Caddyfile

@@ -1,0 +1,64 @@
+<div class="list-grid">
+  <article class="list-card all">
+    <div class="list-card-top">
+      <span class="list-kicker">Every search</span>
+      {% if all.has_leads %}<span class="muted small">{{ all.places }} cities</span>{% endif %}
+    </div>
+    <h3><a class="list-card-link" href="/leads/browse">All leads</a></h3>
+    <p class="list-card-sub">Each business is stored once, however many searches found it.</p>
+    <div class="list-card-count"><b>{{ all.leads }}</b><span>leads</span></div>
+    {% if all.has_leads %}
+    <div class="coverage">
+      <div><span>Phone</span><div class="progress"><i style="width: {{ all.phone_pct }}%"></i></div><b>{{ all.phone_pct }}%</b></div>
+      <div><span>Website</span><div class="progress"><i style="width: {{ all.website_pct }}%"></i></div><b>{{ all.website_pct }}%</b></div>
+    </div>
+    <div class="list-chips">
+      {% for chip in all.categories %}<a class="cat-chip" href="{{ chip.href }}">{{ chip.label }} <b>{{ chip.count }}</b></a>{% endfor %}
+      {% if all.more_categories > 0 %}<span class="cat-chip more">+{{ all.more_categories }}</span>{% endif %}
+    </div>
+    <footer class="list-card-foot">
+      <a class="link quiet" href="/leads/browse?website=none">{{ all.no_website }} without a website →</a>
+    </footer>
+    {% endif %}
+  </article>
+
+  {% for card in cards %}
+  <article class="list-card">
+    <div class="list-card-top">
+      <span class="badge {{ card.job.status_class }}">{% if card.job.status_class == "live" %}<span class="pulse"></span>{% endif %}{{ card.job.status }}</span>
+      <span class="muted small">{{ card.updated }}</span>
+    </div>
+    <h3><a class="list-card-link" href="{{ card.href }}">{{ card.job.name }}</a></h3>
+    <p class="list-card-sub clip" title="{{ card.job.queries }} · {{ card.job.locations }}">{{ card.job.queries }}{% if !card.job.locations.is_empty() %} · {{ card.job.locations }}{% endif %}</p>
+    <div class="list-card-count">
+      <b>{{ card.leads }}</b><span>leads</span>
+      {% if !card.shared.is_empty() %}<span class="list-card-shared" title="Businesses an earlier search also found">{{ card.shared }} also in other searches</span>{% endif %}
+    </div>
+    {% if card.has_leads %}
+    <div class="coverage">
+      <div><span>Phone</span><div class="progress"><i style="width: {{ card.phone_pct }}%"></i></div><b>{{ card.phone_pct }}%</b></div>
+      <div><span>Website</span><div class="progress"><i style="width: {{ card.website_pct }}%"></i></div><b>{{ card.website_pct }}%</b></div>
+    </div>
+    <div class="list-chips">
+      {% for chip in card.categories %}<a class="cat-chip" href="{{ chip.href }}">{{ chip.label }} <b>{{ chip.count }}</b></a>{% endfor %}
+      {% if card.more_categories > 0 %}<span class="cat-chip more">+{{ card.more_categories }}</span>{% endif %}
+    </div>
+    {% else %}
+    <p class="list-card-empty muted small">{% if card.job.active %}Collecting — leads appear here as they're found.{% else %}This search found no leads.{% endif %}</p>
+    {% endif %}
+    <footer class="list-card-foot">
+      <a class="link quiet" href="/jobs/{{ card.job.id }}">Search details</a>
+      <span class="spacer"></span>
+      {% if card.has_leads %}<a class="btn sm" href="/leads/export.csv?source={{ card.job.id }}" hx-boost="false">Export CSV</a>{% endif %}
+    </footer>
+  </article>
+  {% endfor %}
+
+  {% if cards.is_empty() %}
+  <article class="list-card ghost">
+    <h3>No searches yet</h3>
+    <p class="list-card-sub">Each search you run becomes a lead list here, with its own counts and export.</p>
+    <footer class="list-card-foot"><a class="btn primary" href="/jobs/new">Start a search</a></footer>
+  </article>
+  {% endif %}
+</div>

@@ -1,0 +1,36 @@
+<section class="card job-hero">
+  <div class="job-hero-top">
+    <div>
+      <span class="badge lg {{ job.status_class }}">{% if job.status_class == "live" %}<span class="pulse"></span>{% endif %}{{ job.status }}</span>
+      {% for tag in job.tags %}<span class="tag">{{ tag }}</span>{% endfor %}
+    </div>
+    {% include "partials/job_actions.html" %}
+  </div>
+  <div class="job-hero-numbers">
+    <div><span class="stat-value">{{ job.collected }}</span><span class="stat-label">collected of {{ job.total_label }}</span></div>
+    <div><span class="stat-value">{{ job.searches }}</span><span class="stat-label">areas</span></div>
+    <div><span class="stat-value">{{ job.duplicates }}</span><span class="stat-label">repeats skipped</span></div>
+    <div><span class="stat-value {% if job.failures > 0 %}error-text{% endif %}">{{ job.failures }}</span><span class="stat-label">failed areas</span></div>
+  </div>
+  <div class="progress lg {% if job.active && !job.has_target %}indeterminate{% endif %}"><i style="width: {{ job.pct }}%"></i></div>
+  {% if job.live && !activity.is_empty() %}<div class="activity-line small"><span class="pulse"></span>{{ activity }}</div>{% endif %}
+  <div class="job-hero-foot small muted">
+    {% if !job.started.is_empty() %}Started {{ job.started }}{% endif %}
+    {% if !job.finished.is_empty() %} · Finished {{ job.finished }}{% endif %}
+    {% if job.active && !job.live %} · <span class="error-text">not controllable from this server process</span>{% endif %}
+  </div>
+  {% if !job.error.is_empty() %}<div class="callout bad">{{ job.error }}</div>{% endif %}
+</section>
+
+<section class="card">
+  <header class="card-head"><h2>Event log</h2><span class="muted small">{{ events.len() }} most recent</span></header>
+  {% if events.is_empty() %}
+    <div class="empty"><p>No events yet.</p></div>
+  {% else %}
+    <ol class="log">
+      {% for event in events %}
+      <li class="{{ event.level }}"><time>{{ event.time }}</time><span class="lvl">{{ event.level }}</span><span class="msg">{{ event.message }}</span></li>
+      {% endfor %}
+    </ol>
+  {% endif %}
+</section>

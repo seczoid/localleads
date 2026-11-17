@@ -1,0 +1,11 @@
+{% if pager.pages > 1 || pager.from > 0 %}
+<nav class="pager">
+  <span class="muted small">{{ pager.from }}–{{ pager.to }} of {{ pager.total }}</span>
+  <span class="spacer"></span>
+  {% if pager.pages > 1 %}
+  <button type="button" class="btn sm" {% if pager.prev_url.is_empty() %}disabled{% else %}hx-get="{{ pager.prev_url }}" hx-target="closest [id]"{% endif %}>← Prev</button>
+  <span class="small">Page {{ pager.page }} / {{ pager.pages }}</span>
+  <button type="button" class="btn sm" {% if pager.next_url.is_empty() %}disabled{% else %}hx-get="{{ pager.next_url }}" hx-target="closest [id]"{% endif %}>Next →</button>
+  {% endif %}
+</nav>
+{% endif %}

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Leads{% endblock %}
+{% block heading %}<h1>Leads</h1>{% endblock %}
+{% block actions %}
+<a class="btn" href="/leads/browse">Browse all leads</a>
+<a class="btn primary" href="/jobs/new">New search</a>
+{% endblock %}
+{% block content %}
+<div id="lead-lists" hx-get="/partials/lists" hx-trigger="jobs-changed from:body throttle:2s, leads-changed from:body" hx-swap="innerHTML">
+  {{ lists|safe }}
+</div>
+{% endblock %}

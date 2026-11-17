@@ -1,0 +1,23 @@
+# Caddy serves LocalLeads over HTTPS at $DOMAIN, with certificates from
+# Let's Encrypt (or its own local CA for "localhost"). Port 80 only
+# redirects to HTTPS.
+# To get expiry notices from Let's Encrypt, add a global block at the top:
+#   {
+#   	email you@example.com
+#   }
+
+{$DOMAIN} {
+	# Live updates (/events) and MCP (/mcp) stream; don't compress them.
+	@compress not path /events /mcp
+	encode @compress zstd gzip
+
+	reverse_proxy localleads:7878
+
+	# The app sends HSTS and its other security headers itself.
+	header -Server
+
+	log {
+		output stdout
+		format console
+	}
+}

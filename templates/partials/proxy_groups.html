@@ -1,0 +1,26 @@
+<div class="group-bar">
+  <nav class="tabs" aria-label="Proxy groups">
+    <a href="/proxies" class="{% if all_active %}active{% endif %}">All proxies <span class="count">{{ all_count }}</span></a>
+    {% for group in groups %}
+    <a href="/proxies?group={{ group.id }}" class="{% if group.active %}active{% endif %}">{{ group.name }} <span class="count">{{ group.count }}</span></a>
+    {% endfor %}
+    <button type="button" class="tab-add" @click="$dispatch('open-dialog', 'group')">+ New group</button>
+  </nav>
+  {% if !current_id.is_empty() %}
+  <div class="group-tools">
+    <button type="button" class="btn sm ghost" @click="$dispatch('open-dialog', 'rename')">Rename</button>
+    <button type="button" class="btn sm danger ghost" hx-post="/groups/{{ current_id }}/delete" hx-confirm="Delete the group “{{ current_name }}”? Its proxies are kept.">Delete group</button>
+  </div>
+  {% endif %}
+</div>
+<div class="health">
+  <div class="healthbar wide" title="healthy {{ health.healthy }} · slow {{ health.slow }} · failed {{ health.failed }} · unchecked {{ health.unknown }}">
+    <i class="ok" style="width: {{ health.healthy_pct }}%"></i><i class="warn" style="width: {{ health.slow_pct }}%"></i><i class="bad" style="width: {{ health.failed_pct }}%"></i><i class="muted" style="width: {{ health.unknown_pct }}%"></i>
+  </div>
+  <div class="legend small">
+    <button type="button" onclick="filterProxyStatus('healthy')" title="Show healthy proxies"><i class="dot ok"></i>{{ health.healthy }} healthy</button>
+    <button type="button" onclick="filterProxyStatus('slow')" title="Show slow proxies"><i class="dot warn"></i>{{ health.slow }} slow</button>
+    <button type="button" onclick="filterProxyStatus('failed')" title="Show failed proxies"><i class="dot bad"></i>{{ health.failed }} failed</button>
+    <button type="button" onclick="filterProxyStatus('unknown')" title="Show unchecked proxies"><i class="dot muted"></i>{{ health.unknown }} unchecked</button>
+  </div>
+</div>

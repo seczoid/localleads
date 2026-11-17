@@ -1,0 +1,20 @@
+{% if progress.running %}
+<section class="card check-progress">
+  <div class="check-progress-head">
+    <strong><span class="pulse"></span>{% if progress.cancelling %}Stopping check…{% else %}Checking proxies{% endif %}</strong>
+    <span class="check-count"><b>{{ progress.completed }}</b> of {{ progress.total }}</span>
+    {% if !progress.rate.is_empty() %}<span class="small muted">{{ progress.rate }}{% if !progress.eta.is_empty() %} · {{ progress.eta }}{% endif %}</span>{% endif %}
+    <span class="spacer"></span>
+    {% if !progress.cancelling %}<button class="btn sm" hx-post="/proxies/check/cancel">Stop</button>{% endif %}
+  </div>
+  <div class="progress lg"><i style="width: {{ progress.pct }}%"></i></div>
+  <div class="legend small">
+    <span><i class="dot ok"></i>{{ progress.healthy }} healthy</span>
+    <span><i class="dot warn"></i>{{ progress.slow }} slow</span>
+    <span><i class="dot bad"></i>{{ progress.failed }} failed</span>
+  </div>
+</section>
+{% endif %}
+{% if progress.import_running %}
+<div class="callout info"><span class="pulse"></span>Importing proxy file…</div>
+{% endif %}

@@ -1,0 +1,101 @@
+<div class="modal-backdrop" x-data @keydown.escape.window="$root.remove()" @close-modal.window="$root.remove()" @click.self="$root.remove()">
+  <div class="modal wide" role="dialog" aria-modal="true" aria-labelledby="lead-title">
+    <header class="modal-head">
+      <div>
+        <h2 id="lead-title">{{ detail.lead.name }}</h2>
+        <p class="muted">{{ detail.lead.category }}</p>
+      </div>
+      <button type="button" class="icon-btn" @click="$root.remove()" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg></button>
+    </header>
+    <div class="modal-body">
+      <div class="lead-actions">
+        {% if !detail.lead.phone.is_empty() %}<a class="btn sm" href="tel:{{ detail.lead.phone }}" hx-boost="false">Call {{ detail.lead.phone }}</a>{% endif %}
+        {% if !detail.lead.website.is_empty() %}<a class="btn sm" href="{{ detail.lead.website }}" target="_blank" rel="noopener noreferrer" hx-boost="false">Website ↗</a>{% endif %}
+        {% if !detail.lead.maps_url.is_empty() %}<a class="btn sm" href="{{ detail.lead.maps_url }}" target="_blank" rel="noopener noreferrer" hx-boost="false">Google Maps ↗</a>{% endif %}
+        <button type="button" class="btn sm ghost" x-data="{ copied: false }" @click="navigator.clipboard.writeText($el.dataset.copy).then(() => { copied = true; setTimeout(() => copied = false, 1500) })" data-copy="{{ detail.lead.name }}&#10;{{ detail.lead.address }}&#10;{{ detail.lead.phone }}&#10;{{ detail.lead.website }}" x-text="copied ? 'Copied' : 'Copy contact'">Copy contact</button>
+      </div>
+      <dl class="kv">
+        <dt>Address</dt><dd>{{ detail.lead.address }}</dd>
+        {% if !detail.lead.location.is_empty() %}<dt>City</dt><dd>{{ detail.lead.location }} {{ detail.lead.postal_code }}</dd>{% endif %}
+        <dt>Phone</dt><dd>{{ detail.lead.phone }}</dd>
+        <dt>Website</dt><dd class="break">{{ detail.lead.website }}</dd>
+        <dt>Rating</dt><dd>{% if !detail.lead.rating.is_empty() %}★ {{ detail.lead.rating }} ({{ detail.lead.reviews }} reviews){% endif %}</dd>
+        <dt>Status</dt><dd>{{ detail.lead.status }}</dd>
+        <dt>Coordinates</dt><dd>{{ detail.coordinates }}</dd>
+        <dt>Hours</dt><dd>{% if detail.hours.is_empty() %}<span class="muted">not listed</span>{% else %}<ul class="plain">{% for line in detail.hours %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}</dd>
+        <dt>Place ID</dt><dd class="mono break">{{ detail.lead.place_id }}</dd>
+        <dt>Found by</dt><dd>{% if detail.sources.is_empty() %}<span class="muted">no search</span>{% else %}<ul class="plain sources">{% for source in detail.sources %}<li><a href="/leads/browse?source={{ source.job_id }}">{{ source.name }}</a>{% if !source.search.is_empty() %} <span class="muted">{{ source.search }}</span>{% endif %} <span class="muted small">· {{ source.found }}</span></li>{% endfor %}</ul>{% endif %}</dd>
+        <dt>Collected</dt><dd>{{ detail.created }} via {{ detail.source }}</dd>
+      </dl>
+      {% let e = detail.enrich %}
+      <section class="lead-section">
+        <h3>Emails
+          {% if e.status == "queued" %}<span class="badge live">checking</span>
+          {% else if e.status.is_empty() %}<span class="muted small">not checked yet</span>
+          {% else %}<span class="muted small">checked {{ e.enriched }}{% if e.pages > 0 %} · {{ e.pages }} pages read{% endif %}</span>{% endif %}
+        </h3>
+        {% if e.emails.is_empty() %}
+          {% if !e.status.is_empty() && e.status != "queued" %}<p class="muted">No email address on {% if detail.lead.website.is_empty() %}this listing (no website){% else %}the website{% endif %}.</p>{% endif %}
+        {% else %}
+        <ul class="email-list">
+          {% for m in e.emails %}
+          <li>
+            {% if !m.gravatar.is_empty() %}<img class="gravatar" src="{{ m.gravatar }}" alt="" loading="lazy" referrerpolicy="no-referrer">{% endif %}
+            <div class="email-main">
+              <div><a class="mono" href="mailto:{{ m.email }}" hx-boost="false">{{ m.email }}</a>
+                {% if !m.verdict.is_empty() %}<span class="badge {{ m.tone }}">{{ m.verdict }}</span>{% endif %}{% if !m.details.is_empty() %} <span class="muted small">{{ m.details }}</span>{% endif %}</div>
+              {% if !m.person.is_empty() %}<div class="small">{{ m.person }}</div>{% endif %}
+              <div class="muted small">Found as {{ m.found }}{% if !m.source.is_empty() %} on <a href="{{ m.source }}" target="_blank" rel="noopener noreferrer" hx-boost="false" class="break">{{ m.source }}</a>{% endif %}</div>
+              {% if !m.checks.is_empty() %}<div class="check-tags">{% for c in m.checks %}<span class="tag">{{ c }}</span>{% endfor %}</div>{% endif %}
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+        {% if !e.errors.is_empty() %}<p class="muted small">{% for err in e.errors %}{{ err }}{% if !loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+      </section>
+      {% if !e.website_title.is_empty() || !e.socials.is_empty() || !e.phones.is_empty() || !e.people.is_empty() %}
+      <section class="lead-section">
+        <h3>Website</h3>
+        <dl class="kv">
+          {% if !e.website_title.is_empty() %}<dt>Title</dt><dd>{{ e.website_title }}</dd>{% endif %}
+          {% if !e.website_description.is_empty() %}<dt>Description</dt><dd>{{ e.website_description }}</dd>{% endif %}
+          {% if !e.website_generator.is_empty() %}<dt>Built with</dt><dd>{{ e.website_generator }}</dd>{% endif %}
+          {% if !e.website_tags.is_empty() %}<dt>Tracking</dt><dd>{% for t in e.website_tags %}{{ t }}{% if !loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+          {% if !e.phones.is_empty() %}<dt>Phones on site</dt><dd>{{ e.phones }}</dd>{% endif %}
+          {% if !e.socials.is_empty() %}<dt>Social</dt><dd>{% for (label, url) in e.socials %}<a href="{{ url }}" target="_blank" rel="noopener noreferrer" hx-boost="false">{{ label }}</a>{% if !loop.last %} · {% endif %}{% endfor %}</dd>{% endif %}
+          {% if !e.people.is_empty() %}<dt>People</dt><dd><ul class="plain">{% for p in e.people %}<li>{{ p }}</li>{% endfor %}</ul></dd>{% endif %}
+        </dl>
+      </section>
+      {% endif %}
+      {% if !e.per_score.is_empty() || !e.owner.is_empty() || !e.description.is_empty() || !e.photo.is_empty() %}
+      <section class="lead-section">
+        <h3>Google listing</h3>
+        {% if !e.photo.is_empty() || !e.street_view.is_empty() %}
+        <div class="place-photos">
+          {% if !e.photo.is_empty() %}<a href="{{ e.photo }}" target="_blank" rel="noopener noreferrer" hx-boost="false"><img src="{{ e.photo }}" alt="Photo" loading="lazy" referrerpolicy="no-referrer"></a>{% endif %}
+          {% if !e.street_view.is_empty() %}<a href="{{ e.street_view }}" target="_blank" rel="noopener noreferrer" hx-boost="false"><img src="{{ e.street_view }}" alt="Street View" loading="lazy" referrerpolicy="no-referrer"></a>{% endif %}
+        </div>
+        {% endif %}
+        <dl class="kv">
+          {% if let Some(verified) = e.verified %}<dt>Claimed</dt><dd>{% if verified %}<span class="badge ok">Verified owner</span>{% if !e.owner.is_empty() %} {% if !e.owner_link.is_empty() %}<a href="{{ e.owner_link }}" target="_blank" rel="noopener noreferrer" hx-boost="false">{{ e.owner }}</a>{% else %}{{ e.owner }}{% endif %}{% endif %}{% else %}<span class="badge warn">Unclaimed</span>{% endif %}</dd>{% endif %}
+          {% if !e.per_score.is_empty() %}<dt>Reviews</dt><dd><div class="score-bars">{% for (star, count, width) in e.per_score %}<div><span>{{ star }}★</span><div class="progress"><i style="width: {{ width }}%"></i></div><b>{{ count }}</b></div>{% endfor %}</div></dd>{% endif %}
+          {% if !e.review_tags.is_empty() %}<dt>Review topics</dt><dd>{{ e.review_tags }}</dd>{% endif %}
+          {% if !e.description.is_empty() %}<dt>Description</dt><dd>{{ e.description }}</dd>{% endif %}
+          {% if !e.about.is_empty() %}<dt>About</dt><dd><ul class="plain">{% for a in e.about %}<li>{{ a }}</li>{% endfor %}</ul></dd>{% endif %}
+          {% for (label, value) in e.ids %}<dt>{{ label }}</dt><dd class="mono break">{{ value }}</dd>{% endfor %}
+        </dl>
+      </section>
+      {% endif %}
+      <details class="raw">
+        <summary>Raw Maps data</summary>
+        <pre>{{ detail.raw_json }}</pre>
+      </details>
+    </div>
+    <footer class="modal-foot">
+      <button class="btn danger ghost" hx-post="/leads/{{ detail.lead.id }}/delete" hx-confirm="Delete this lead? This cannot be undone.">Delete lead</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn" @click="$root.remove()">Close</button>
+    </footer>
+  </div>
+</div>

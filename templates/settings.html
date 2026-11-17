@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block heading %}<h1>Settings</h1>{% endblock %}
+{% block content %}
+<div class="grid-2 align-start">
+  <section class="card">
+    <header class="card-head"><h2>Database</h2></header>
+    <dl class="kv">
+      <dt>File</dt><dd class="mono break">{{ db_path }}</dd>
+      <dt>Size</dt><dd>{{ db_size }}</dd>
+      <dt>Contents</dt><dd>{{ stats.jobs }} jobs · {{ stats.leads }} leads · {{ stats.proxies }} proxies</dd>
+      <dt>Exports folder</dt><dd class="mono break">{{ data_dir }}</dd>
+      <dt>Version</dt><dd>LocalLeads {{ version }}</dd>
+    </dl>
+    <p class="hint">The database holds searches, leads, proxy health history, and the proxy credentials needed to use them. Keep the file private.</p>
+  </section>
+
+  <section class="card">
+    <header class="card-head"><h2>Backup and restore</h2></header>
+    <a class="btn primary" href="/settings/backup.sqlite" hx-boost="false">Download a backup</a>
+    <form hx-post="/settings/backup" class="stack">
+      <label class="field">
+        <span>Or write a backup to a path on this machine</span>
+        <input name="path" placeholder="{{ default_backup }}">
+      </label>
+      <button class="btn">Write backup</button>
+    </form>
+    <p class="hint">To restore, stop the server and start it with:</p>
+    <pre class="code">localleads --db "{{ db_path }}" --restore /path/to/backup.sqlite</pre>
+  </section>
+</div>
+
+<div class="grid-2 align-start">
+  <section class="card" id="account">
+    <header class="card-head"><h2>Account</h2></header>
+    <dl class="kv">
+      <dt>Signed in as</dt><dd class="break">{{ email }}</dd>
+    </dl>
+    <form method="post" action="/logout" hx-boost="false" class="stack">
+      <button class="btn">Sign out</button>
+    </form>
+    <p class="hint">There is one account per database. There's no password reset: if you forget the password, you'll need to start over with a new database.</p>
+  </section>
+
+  <section class="card">
+    <header class="card-head"><h2>Change password</h2></header>
+    <form hx-post="/account/password" class="stack" hx-on::after-request="if (event.detail.successful) this.reset()">
+      <label class="field">
+        <span>Current password</span>
+        <input type="password" name="current" autocomplete="current-password" required>
+      </label>
+      <label class="field">
+        <span>New password</span>
+        <input type="password" name="password" autocomplete="new-password" minlength="8" required>
+      </label>
+      <label class="field">
+        <span>Confirm new password</span>
+        <input type="password" name="confirm" autocomplete="new-password" minlength="8" required>
+      </label>
+      <button class="btn primary">Change password</button>
+    </form>
+    <p class="hint">Changing it signs out every other browser. API keys keep working.</p>
+  </section>
+</div>
+
+<section class="card" id="activity">
+  <header class="card-head"><h2>Activity since the server started</h2></header>
+  {% if notices.is_empty() %}
+    <div class="empty"><p>Nothing yet.</p></div>
+  {% else %}
+  <ul class="activity">
+    {% for notice in notices %}<li class="{{ notice.level }}"><time>{{ notice.at }}</time><span>{{ notice.message }}</span></li>{% endfor %}
+  </ul>
+  {% endif %}
+</section>
+
+<section class="card">
+  <header class="card-head"><h2>About scraping</h2></header>
+  <p>LocalLeads reads Google Maps web responses directly; no API key is needed. Google can change the response format, ask for consent, rate-limit, or restrict access. Those responses are reported as search failures and are never bypassed. Collect data in line with applicable law and Google's access policies.</p>
+  <p class="hint">JSON API: <code>/api/stats</code>, <code>/api/jobs</code>, <code>/api/jobs/&lt;id&gt;</code>, <code>/api/leads?q=&amp;source=&amp;limit=&amp;offset=</code></p>
+</section>
+{% endblock %}
