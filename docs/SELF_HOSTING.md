@@ -8,6 +8,41 @@ it, which gets and renews HTTPS certificates from Let's Encrypt on its own.
 internet ──443──▶ caddy (HTTPS, HTTP/3) ──▶ localleads:7878 ──▶ /data/localleads.sqlite
 ```
 
+## The quick way: setup.sh
+
+On the server (or your own computer), with Docker installed and running:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh | bash
+```
+
+It checks Docker, asks where you'll open LocalLeads (your domain, the
+server's IP, only this computer, or behind your own web server), writes
+`compose.yaml`, `Caddyfile` and `.env` to `/opt/localleads` (or
+`~/localleads` when not root), downloads the image, starts it and prints the
+address and the setup code. Caddy runs in its own container, so there's
+nothing else to install.
+
+If ports 80 and 443 are already taken, it names what's using them and offers
+other ports (fine for an IP address; a domain needs 80 or 443 free for Let's
+Encrypt) or your existing web server. In that case it prints an nginx, Caddy
+or Apache config for you to paste in, and saves it in the install folder.
+
+Run the same command again to update, change settings or uninstall. Without
+questions, for scripts:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh | bash -s -- --domain leads.example.com --yes
+```
+
+`bash setup.sh --help` lists every option. Day to day, manage it from the
+install folder with plain `docker compose` (`logs -f localleads`, `restart`,
+`down`). The rest of this guide (backups, settings, security) applies to
+both setups; with setup.sh, run the `docker compose` commands from
+`/opt/localleads`.
+
+The rest of this page sets it up by hand from the repository instead.
+
 ## What you need
 
 - A Linux server with Docker Engine and the Compose plugin

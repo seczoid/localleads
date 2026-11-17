@@ -199,7 +199,7 @@ port_busy() {
 
 free_port_from() {
 	local port=$1
-	while port_busy "$port"; do port=$((port + 1)); done
+	while port_taken "$port"; do port=$((port + 1)); done
 	printf '%s' "$port"
 }
 
@@ -432,6 +432,15 @@ running() {
 	[ -n "$(dc ps -q --status running localleads 2>/dev/null)" ]
 }
 
+# A port this install already publishes is free for it: it's restarted in
+# place.
+ours() {
+	[ -n "$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT" --filter "publish=$1" 2>/dev/null)" ]
+}
+
+# In use by something other than this install.
+port_taken() { port_busy "$1" && ! ours "$1"; }
+
 existing_menu() {
 	step "LocalLeads is already installed in $DIR"
 	if running; then ok "It's running"; else note "It's stopped"; fi
@@ -465,6 +474,13 @@ uninstall() {
 	fi
 	if [ "$delete" = 1 ]; then
 		dc down --volumes --remove-orphans
+		# Volumes from an earlier setup (Caddy's, after switching modes).
+		local volumes
+		volumes=$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null) || volumes=""
+		if [ -n "$volumes" ]; then
+			# shellcheck disable=SC2086
+			docker volume rm $volumes >/dev/null
+		fi
 		ok "Stopped LocalLeads and deleted its data"
 	else
 		dc down --remove-orphans
@@ -472,7 +488,7 @@ uninstall() {
 		note "Run this script again to start it with the same data,"
 		note "or delete the data later with: docker volume rm ${PROJECT}_localleads-data"
 	fi
-	rm -f "$DIR/compose.yaml" "$DIR/Caddyfile" "$DIR/.env"
+	rm -f "$DIR/compose.yaml" "$DIR/Caddyfile" "$DIR/.env" "$DIR"/proxy-*
 	rm -rf "$DIR/src"
 	rmdir "$DIR" 2>/dev/null || true
 	ok "Removed the config in $DIR"
@@ -560,7 +576,7 @@ configure_ip() {
 configure_local() {
 	local default
 	default=${PORT:-7878}
-	if [ "$ACTION" != update ] && ! running && port_busy "$default"; then
+	if port_taken "$default"; then
 		local free
 		free=$(free_port_from "$default")
 		note "Port $default is in use, so it'll use $free."
@@ -579,10 +595,11 @@ configure_local() {
 
 configure_proxy() {
 	while :; do
-		if [ -z "$PROXY_URL" ]; then
-			[ "$INTERACTIVE" = 1 ] || die "--proxy needs the address people open, like https://leads.example.com."
-			ask "Address people open (like https://leads.example.com)"
+		if [ "$INTERACTIVE" = 1 ]; then
+			ask "Address people open (like https://leads.example.com)" "$PROXY_URL"
 			PROXY_URL=$ANSWER
+		elif [ -z "$PROXY_URL" ]; then
+			die "--proxy needs the address people open, like https://leads.example.com."
 		fi
 		case $PROXY_URL in
 		http://* | https://*) PROXY_URL=${PROXY_URL%/}; break ;;
@@ -610,23 +627,109 @@ public_url() {
 
 uses_caddy() { [ "$MODE" = domain ] || [ "$MODE" = ip ]; }
 
-check_ports() {
-	# Ports the current install holds are fine; it's restarted in place.
-	if running; then return; fi
-	local port busy=""
-	if uses_caddy; then
-		for port in "$HTTP_PORT" "$HTTPS_PORT"; do
-			if port_busy "$port"; then busy="$busy $port"; fi
-		done
-		if [ -n "$busy" ]; then
-			die "Port(s)$busy are already in use on this machine." \
-				"Caddy needs them to serve HTTPS. Stop what's using them (often nginx" \
-				"or Apache: sudo systemctl disable --now nginx), or choose" \
-				"\"Behind my own reverse proxy\" to keep your web server in front."
-		fi
-	elif port_busy "$PORT"; then
-		die "Port $PORT is already in use." "Choose another with --port."
+PROXY_SOFTWARE=""
+
+# What's listening on a port: "nginx", "the Docker container traefik", ...
+port_owner() {
+	local name="" out
+	name=$(docker ps --filter "publish=$1" --format '{{.Names}}' 2>/dev/null | head -n 1) || name=""
+	if [ -n "$name" ]; then
+		printf 'the Docker container %s' "$name"
+		return
 	fi
+	if command -v ss >/dev/null 2>&1; then
+		out=$(ss -Hltnp "sport = :$1" 2>/dev/null) || out=""
+		name=$(printf '%s\n' "$out" | sed -n 's/.*users:(("\([^"]*\)".*/\1/p' | head -n 1)
+	fi
+	if [ -z "$name" ] && command -v lsof >/dev/null 2>&1; then
+		name=$(lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | awk 'NR==2{print $1}') || name=""
+	fi
+	printf '%s' "${name:-another program}"
+}
+
+# Notes which web server holds a port, for the proxy config example.
+remember_proxy_software() {
+	case $(lower "$1") in
+	*nginx*) PROXY_SOFTWARE=nginx ;;
+	*caddy*) PROXY_SOFTWARE=caddy ;;
+	*apache* | *httpd*) PROXY_SOFTWARE=apache ;;
+	esac
+}
+
+check_ports() {
+	if ! uses_caddy; then
+		if port_taken "$PORT"; then die "Port $PORT is already in use." "Choose another with --port."; fi
+		return
+	fi
+	local http_busy=0 https_busy=0 owner
+	if port_taken "$HTTP_PORT"; then http_busy=1; fi
+	if port_taken "$HTTPS_PORT"; then https_busy=1; fi
+	if [ "$http_busy" = 0 ] && [ "$https_busy" = 0 ]; then return; fi
+
+	step "Ports in use"
+	if [ "$http_busy" = 1 ]; then
+		owner=$(port_owner "$HTTP_PORT")
+		remember_proxy_software "$owner"
+		warn "Port $HTTP_PORT is used by $owner."
+	fi
+	if [ "$https_busy" = 1 ]; then
+		owner=$(port_owner "$HTTPS_PORT")
+		remember_proxy_software "$owner"
+		warn "Port $HTTPS_PORT is used by $owner."
+	fi
+
+	local new_http=$HTTP_PORT new_https=$HTTPS_PORT
+	if [ "$http_busy" = 1 ]; then new_http=$(free_port_from 8080); fi
+	if [ "$https_busy" = 1 ]; then new_https=$(free_port_from 8443); fi
+	if [ "$new_http" = "$new_https" ]; then new_https=$(free_port_from $((new_https + 1))); fi
+
+	# Let's Encrypt checks a domain on port 80 or 443, so a domain needs
+	# one of them. An IP address with its own certificate can use any port.
+	local other_ports=1
+	if [ "$MODE" = domain ] && [ "$http_busy" = 1 ] && [ "$https_busy" = 1 ]; then other_ports=0; fi
+
+	local was_https=$HTTPS_PORT was_http=$HTTP_PORT
+	HTTP_PORT=$new_http HTTPS_PORT=$new_https
+	local other_url
+	other_url=$(public_url)
+	HTTP_PORT=$was_http HTTPS_PORT=$was_https
+
+	if [ "$INTERACTIVE" != 1 ]; then
+		if [ "$other_ports" = 1 ]; then
+			HTTP_PORT=$new_http HTTPS_PORT=$new_https
+			note "Using HTTP port $HTTP_PORT and HTTPS port $HTTPS_PORT instead."
+			return
+		fi
+		die "Ports 80 and 443 are both taken, and Let's Encrypt needs one of them." \
+			"Free one of them, or keep your web server in front and run:" \
+			"  ... | bash -s -- --proxy https://$DOMAIN --yes"
+	fi
+
+	if [ "$other_ports" = 1 ]; then
+		choose 1 \
+			"Use other ports: $other_url" \
+			"Put LocalLeads behind the web server that's already running" \
+			"Quit, so I can free the ports first"
+	else
+		say "  Let's Encrypt needs port 80 or 443 for a domain, and both are taken."
+		choose 1 \
+			"Put LocalLeads behind the web server that's already running" \
+			"Quit, so I can free the ports first"
+		ANSWER=$((ANSWER + 1))
+	fi
+	case $ANSWER in
+	1)
+		HTTP_PORT=$new_http HTTPS_PORT=$new_https
+		;;
+	2)
+		if [ "$MODE" = domain ]; then PROXY_URL="https://$DOMAIN"; else PROXY_URL=""; fi
+		MODE=proxy
+		PORT=""
+		configure_proxy
+		check_ports
+		;;
+	*) exit 0 ;;
+	esac
 }
 
 summary() {
@@ -809,25 +912,42 @@ EOF
 }
 
 write_caddyfile() {
-	local site global="" tls=""
+	local site options="" tls="" redirect=""
 	if [ "$MODE" = domain ]; then
-		site=$DOMAIN
+		site="https://$DOMAIN"
 	else
 		site="https://$SERVER_IP"
 		# Browsers send no server name for an IP address, so tell Caddy
 		# which certificate to answer with; it signs it with its own CA.
-		global="{
-	default_sni $SERVER_IP
-}
-
+		options="	default_sni $SERVER_IP
 "
 		tls="	tls internal
 
 "
 	fi
+	if [ "$HTTPS_PORT" != 443 ]; then
+		# Caddy listens on 443 inside the container and would redirect
+		# there, and advertise HTTP/3 there; send plain HTTP to the port
+		# people actually use, and skip HTTP/3.
+		options="${options}	auto_https disable_redirects
+	servers {
+		protocols h1 h2
+	}
+"
+		redirect="http:// {
+	redir https://{host}:$HTTPS_PORT{uri} permanent
+}
+
+"
+	fi
+	local global=""
+	if [ -n "$options" ]; then global="{
+${options}}
+
+"; fi
 	cat >"$DIR/Caddyfile" <<EOF
 # Written by setup.sh; it's rewritten when you run setup.sh again.
-${global}${site} {
+${global}${redirect}${site} {
 ${tls}	# Live updates (/events) and MCP (/mcp) stream; don't compress them.
 	@compress not path /events /mcp
 	encode @compress zstd gzip
@@ -904,15 +1024,79 @@ wait_https() {
 	note "  cd $DIR && docker compose logs caddy"
 }
 
+# Prints, and saves to the install folder, the config that sends the
+# public address to LocalLeads, for the web server that's in front.
+proxy_example() {
+	local host file example
+	host=$(bare_host "$PROXY_URL")
+	if [ -z "$PROXY_SOFTWARE" ]; then
+		if command -v nginx >/dev/null 2>&1; then
+			PROXY_SOFTWARE=nginx
+		elif command -v caddy >/dev/null 2>&1; then
+			PROXY_SOFTWARE=caddy
+		fi
+	fi
+	case $PROXY_SOFTWARE in
+	caddy)
+		file="$DIR/proxy-caddy.txt"
+		example="$host {
+	reverse_proxy 127.0.0.1:$PORT {
+		flush_interval -1
+	}
+}"
+		;;
+	apache)
+		file="$DIR/proxy-apache.conf"
+		example="# Needs: a2enmod proxy proxy_http headers
+<VirtualHost *:443>
+    ServerName $host
+    ProxyPreserveHost On
+    ProxyPass / http://127.0.0.1:$PORT/ flushpackets=on
+    ProxyPassReverse / http://127.0.0.1:$PORT/
+    RequestHeader set X-Forwarded-Proto https
+    # Your existing SSLEngine / certificate lines go here.
+</VirtualHost>"
+		;;
+	*)
+		file="$DIR/proxy-nginx.conf"
+		example="server {
+    server_name $host;
+    listen 80;
+    # Add your HTTPS listen and certificate lines here, or run:
+    #   certbot --nginx -d $host
+
+    location / {
+        proxy_pass http://127.0.0.1:$PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        # Live updates and MCP stream; don't buffer them.
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+        client_max_body_size 64m;
+    }
+}"
+		;;
+	esac
+	printf '%s\n' "$example" >"$file"
+	say ""
+	say "  ${BOLD}Last step: point your web server at LocalLeads${RESET}"
+	note "It listens on http://127.0.0.1:$PORT. Add this to your ${PROXY_SOFTWARE:-nginx} config"
+	note "(saved as $file), then reload it:"
+	say ""
+	printf '%s\n' "$example" | sed 's/^/    /'
+}
+
 finish() {
 	local url
 	url=$(public_url)
 	say ""
 	say "${GREEN}${BOLD}  LocalLeads is running.${RESET}"
 	say ""
-	say "  Open      ${BOLD}$url${RESET}"
-	if [ "$ACTION" != update ] || [ -n "$SETUP_CODE" ]; then
-		say "  Setup code ${BOLD}$SETUP_CODE${RESET}  ${DIM}(to create your account, the first time)${RESET}"
+	say "  Open         ${BOLD}$url${RESET}"
+	if [ -n "$SETUP_CODE" ]; then
+		say "  Setup code   ${BOLD}$SETUP_CODE${RESET}  ${DIM}(to create your account, the first time)${RESET}"
 	fi
 	if [ "$MODE" = ip ]; then
 		say ""
@@ -922,14 +1106,10 @@ finish() {
 	fi
 	if uses_caddy; then
 		say ""
-		note "If it doesn't load, open ports 80 and 443 (TCP) in your cloud provider's"
-		note "firewall or security group."
+		note "If it doesn't load, open ports $HTTP_PORT and $HTTPS_PORT (TCP) in your cloud"
+		note "provider's firewall or security group."
 	fi
-	if [ "$MODE" = proxy ]; then
-		say ""
-		note "Point your proxy at http://127.0.0.1:$PORT and have it pass"
-		note "X-Forwarded-For and X-Forwarded-Proto. Don't buffer /events or /mcp."
-	fi
+	if [ "$MODE" = proxy ]; then proxy_example; fi
 	say ""
 	say "  ${BOLD}Manage it${RESET}  ${DIM}(from $DIR)${RESET}"
 	say "    docker compose logs -f localleads    ${DIM}# logs${RESET}"

@@ -150,7 +150,7 @@ Things you can just ask:
 
 ### 🔐 Self-hosting with HTTPS
 
-- **Docker + Caddy:** one `docker compose up` gets you automatic HTTPS from Let's Encrypt, HTTP/3 and compression.
+- **One-command setup:** `curl ... | bash` checks Docker, asks where to serve it, and starts it with automatic HTTPS from Let's Encrypt (via Caddy), HTTP/3 and compression. Run it again to update.
 - **Accounts:** first-run setup creates your account (Argon2id password hash); sign out and change your password from Settings.
 - **Hardened for the internet:** a one-time setup code so no stranger can claim a fresh install, sign-in lockout after repeated failures, `Secure` cookies, a Content-Security-Policy and other security headers, and a host allowlist.
 - **Small footprint:** a 194 MB image that idles at under 5 MB of RAM, runs as an unprivileged user, has a health check and shuts down cleanly.
@@ -165,45 +165,72 @@ Things you can just ask:
 
 ## ⚡ Quick start
 
-### Option 1: Docker on a server, with HTTPS
+### One command (server or your own computer)
 
-You need a Linux server with Docker, and a domain whose DNS points at it.
+You need Docker. Run this on your VPS or computer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh | bash
+```
+
+It checks that Docker is running, asks a few questions (press Enter for the defaults), then downloads LocalLeads, starts it and prints the address and a one-time setup code for creating your account. You pick where it's served:
+
+| Choice | You get | Needs |
+| --- | --- | --- |
+| **Your domain** | `https://leads.example.com` with a Let's Encrypt certificate, renewed on its own | A DNS `A` record pointing at the server |
+| **The server's IP** (default on Linux) | `https://203.0.113.7` with a self-signed certificate; your browser warns once | Nothing |
+| **Only this computer** (default on macOS) | `http://localhost:7878` | Nothing |
+| **Behind your own web server** | LocalLeads on `127.0.0.1`, plus a ready-made nginx, Caddy or Apache config to paste in | Your existing nginx, Traefik, Caddy, ... |
+
+HTTPS comes from [Caddy](https://caddyserver.com), which runs in its own container; you don't install it. If ports 80 and 443 are taken (say, by nginx), the script tells you what's using them and offers other ports or your existing web server instead.
+
+Run the same command again to **update**, **change settings** or **uninstall**. Your data stays in a Docker volume across updates.
+
+**Unattended**, for scripts and cloud-init (flags go after `bash -s --`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh | bash -s -- --domain leads.example.com --yes
+```
+
+<details>
+<summary>All setup.sh options</summary>
+
+| Option | What it does |
+| --- | --- |
+| `--domain NAME` | Serve at your domain with Let's Encrypt HTTPS |
+| `--ip [ADDRESS]` | Serve at the server's IP with a self-signed certificate |
+| `--local` | Only this computer, at `http://localhost:PORT` |
+| `--proxy URL` | Behind your own reverse proxy; `URL` is the address people open |
+| `--port N` | Port for `--local` and `--proxy` (default 7878) |
+| `--http-port N`, `--https-port N` | Host ports for Caddy (default 80 and 443) |
+| `--dir PATH` | Install folder (default `/opt/localleads` as root, else `~/localleads`) |
+| `--image REF` | Docker image to run (default `ghcr.io/seczoid/localleads:latest`) |
+| `--source PATH` | Build the image from a source checkout |
+| `-y`, `--yes` | Don't ask; use the defaults and the options given |
+| `--update` | Update an existing install |
+| `--uninstall` | Stop and remove it; add `--delete-data` to also delete the data |
+
+</details>
+
+> Prefer to see what runs first? Download it, read it, then run it: `curl -fsSLO https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh && less setup.sh && bash setup.sh`
+
+### Docker Compose by hand
+
+If you'd rather manage the files yourself, the repo's `compose.yaml` runs LocalLeads behind Caddy:
 
 ```bash
 git clone https://github.com/seczoid/localleads.git
 cd localleads
-cp .env.example .env
-```
-
-Set your domain in `.env`:
-
-```bash
-DOMAIN=leads.example.com
-```
-
-Start it (the first build compiles the app and takes 10 to 20 minutes):
-
-```bash
+cp .env.example .env    # set DOMAIN=leads.example.com
 docker compose up -d --build
+docker compose logs localleads    # the one-time setup code
 ```
 
-Get the one-time setup code for creating your account:
-
-```bash
-docker compose logs localleads
-```
-
-Open `https://leads.example.com`, enter the code, and create your account. Caddy fetches and renews the certificate on its own.
-
-Update later with:
-
-```bash
-git pull && docker compose up -d --build
-```
+Open `https://leads.example.com`, enter the code and create your account. Update with `git pull && docker compose up -d --build`.
 
 > Backups, restores, all settings, and running behind your own nginx or Traefik are covered in **[docs/SELF_HOSTING.md](docs/SELF_HOSTING.md)**.
 
-### Option 2: Docker on your own computer
+### Docker on your own computer, without Compose
 
 ```bash
 git clone https://github.com/seczoid/localleads.git
@@ -215,7 +242,7 @@ docker logs localleads
 
 Open [http://127.0.0.1:7878](http://127.0.0.1:7878) and create your account with the setup code from the log.
 
-### Option 3: Build from source
+### Build from source
 
 **1. Install the build tools.**
 
