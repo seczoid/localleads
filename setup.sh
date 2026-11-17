@@ -43,7 +43,9 @@ die() {
 	printf '\n%s✗ %s%s\n' "$RED" "$1" "$RESET" >&2
 	shift
 	local line
-	for line in "$@"; do printf '  %s\n' "$line" >&2; done
+	for line in "$@"; do
+		if [ -n "$line" ]; then printf '  %s\n' "$line" >&2; else printf '\n' >&2; fi
+	done
 	printf '\n' >&2
 	exit 1
 }
@@ -281,7 +283,9 @@ ACTION=""
 DELETE_DATA=0
 
 need_value() {
-	[ $# -ge 2 ] && [ -n "$2" ] && [ "${2#-}" = "$2" ] || die "$1 needs a value." "Run with --help to see the options."
+	if [ $# -lt 2 ] || [ -z "$2" ] || [ "${2#-}" != "$2" ]; then
+		die "$1 needs a value." "Run with --help to see the options."
+	fi
 }
 
 parse_args() {
@@ -376,10 +380,18 @@ check_docker() {
 				die "Docker is installed but not running." \
 					"Start Docker Desktop, OrbStack or Colima (colima start), then run this again."
 			else
+				local sudo="sudo " start
+				[ "$(id -u)" != 0 ] || sudo=""
+				# No systemd in WSL and some containers and minimal VMs.
+				if [ ! -d /run/systemd/system ] && command -v service >/dev/null 2>&1; then
+					start="${sudo}service docker start"
+				else
+					start="${sudo}systemctl enable --now docker"
+				fi
 				die "Docker is installed but not running." \
 					"Start it, then run this again:" \
 					"" \
-					"  sudo systemctl enable --now docker"
+					"  $start"
 			fi
 			;;
 		esac
@@ -426,10 +438,25 @@ load_install() {
 	[ -n "$IMAGE" ] || IMAGE=$(env_get LOCALLEADS_IMAGE "$env")
 	if [ -z "$PROXY_URL" ] && [ "$MODE" = proxy ]; then PROXY_URL=$(env_get PUBLIC_URL "$env"); fi
 	SETUP_CODE=$(env_get LOCALLEADS_SETUP_CODE "$env")
+	case $(env_get LOCALLEADS_MODE "$env") in
+	domain | ip) HELD_PORTS=" $(env_get HTTP_PORT "$env") $(env_get HTTPS_PORT "$env") " ;;
+	*) HELD_PORTS=" $(env_get PORT "$env") " ;;
+	esac
 }
 
 running() {
 	[ -n "$(dc ps -q --status running localleads 2>/dev/null)" ]
+}
+
+# The host ports the existing install publishes, like " 80 443 ".
+HELD_PORTS=" "
+
+# In use by something other than the running install, which is restarted
+# in place and so frees its own ports.
+port_taken() {
+	port_busy "$1" || return 1
+	case $HELD_PORTS in *" $1 "*) running && return 1 ;; esac
+	return 0
 }
 
 existing_menu() {
@@ -465,6 +492,9 @@ uninstall() {
 	fi
 	if [ "$delete" = 1 ]; then
 		dc down --volumes --remove-orphans
+		# Also Caddy's volumes from an earlier domain or IP setup, which the
+		# current compose.yaml may no longer list.
+		delete_volumes
 		ok "Stopped LocalLeads and deleted its data"
 	else
 		dc down --remove-orphans
@@ -476,6 +506,45 @@ uninstall() {
 	rm -rf "$DIR/src"
 	rmdir "$DIR" 2>/dev/null || true
 	ok "Removed the config in $DIR"
+	say ""
+}
+
+# Docker volumes of this compose project, one per line.
+project_volumes() {
+	docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null || true
+}
+
+delete_volumes() {
+	local volumes
+	volumes=$(project_volumes)
+	[ -n "$volumes" ] || return 0
+	# shellcheck disable=SC2086 # one name per word
+	docker volume rm $volumes >/dev/null
+}
+
+# --uninstall when the config is gone, e.g. a second run to delete the data
+# an earlier uninstall kept.
+uninstall_leftovers() {
+	local volumes
+	volumes=$(project_volumes)
+	if [ -z "$volumes" ]; then
+		die "LocalLeads isn't installed in $DIR." "Pass --dir if it's somewhere else."
+	fi
+	step "LocalLeads isn't installed, but its data is still here"
+	note "Volumes: $(printf '%s' "$volumes" | tr '\n' ' ')"
+	local delete=$DELETE_DATA
+	if [ "$INTERACTIVE" = 1 ] && [ "$delete" != 1 ]; then
+		if confirm "Delete all LocalLeads data? This can't be undone" n; then
+			ask "Type delete to confirm"
+			if [ "$ANSWER" = delete ]; then delete=1; else note "Keeping the data."; fi
+		fi
+	fi
+	if [ "$delete" = 1 ]; then
+		delete_volumes
+		ok "Deleted the LocalLeads data"
+	else
+		note "Kept. Delete it with --uninstall --delete-data, or install again to use it."
+	fi
 	say ""
 }
 
@@ -511,7 +580,10 @@ configure() {
 
 configure_domain() {
 	while ! is_domain "$DOMAIN" || [ "$DOMAIN" = localhost ]; do
-		[ "$INTERACTIVE" = 1 ] || die "--domain is needed (for example --domain leads.example.com)."
+		if [ "$INTERACTIVE" != 1 ]; then
+			[ "$DOMAIN" != localhost ] || die "Let's Encrypt can't issue a certificate for localhost." "Use --local to run it on this computer only."
+			die "--domain is needed (for example --domain leads.example.com)."
+		fi
 		[ -z "$DOMAIN" ] || say "  \"$DOMAIN\" doesn't look like a domain name, like leads.example.com."
 		ask "Domain name (like leads.example.com)" "$DOMAIN"
 		DOMAIN=$(bare_host "$ANSWER")
@@ -560,7 +632,7 @@ configure_ip() {
 configure_local() {
 	local default
 	default=${PORT:-7878}
-	if [ "$ACTION" != update ] && ! running && port_busy "$default"; then
+	if [ "$ACTION" != update ] && port_taken "$default"; then
 		local free
 		free=$(free_port_from "$default")
 		note "Port $default is in use, so it'll use $free."
@@ -611,12 +683,10 @@ public_url() {
 uses_caddy() { [ "$MODE" = domain ] || [ "$MODE" = ip ]; }
 
 check_ports() {
-	# Ports the current install holds are fine; it's restarted in place.
-	if running; then return; fi
 	local port busy=""
 	if uses_caddy; then
 		for port in "$HTTP_PORT" "$HTTPS_PORT"; do
-			if port_busy "$port"; then busy="$busy $port"; fi
+			if port_taken "$port"; then busy="$busy $port"; fi
 		done
 		if [ -n "$busy" ]; then
 			die "Port(s)$busy are already in use on this machine." \
@@ -624,7 +694,7 @@ check_ports() {
 				"or Apache: sudo systemctl disable --now nginx), or choose" \
 				"\"Behind my own reverse proxy\" to keep your web server in front."
 		fi
-	elif port_busy "$PORT"; then
+	elif port_taken "$PORT"; then
 		die "Port $PORT is already in use." "Choose another with --port."
 	fi
 }
@@ -639,7 +709,11 @@ summary() {
 	proxy) printf '  %-10s %s\n' "Proxy to" "http://127.0.0.1:$PORT" ;;
 	esac
 	printf '  %-10s %s\n' "Folder" "$DIR"
-	printf '  %-10s %s\n' "Image" "${IMAGE:-$REGISTRY_IMAGE:latest}"
+	if [ -n "$SOURCE" ]; then
+		printf '  %-10s %s\n' "Image" "Built from $SOURCE"
+	else
+		printf '  %-10s %s\n' "Image" "${IMAGE:-$REGISTRY_IMAGE:latest}"
+	fi
 	say ""
 	confirm "Install now?" y || exit 0
 }
@@ -659,14 +733,20 @@ get_image() {
 		fi
 		die "Couldn't find the image $IMAGE."
 	fi
-	local ref
+	local ref err
+	# Progress goes to the terminal; the error is kept to print one short line,
+	# since a missing tag is expected and shouldn't look like a failure.
+	exec 4>&1
 	for ref in "$REGISTRY_IMAGE:latest" "$REGISTRY_IMAGE:edge"; do
-		if docker pull "$ref"; then
+		if err=$(docker pull "$ref" 2>&1 >&4); then
+			exec 4>&-
 			IMAGE=$ref
 			ok "Downloaded $ref"
 			return
 		fi
+		note "$ref isn't available ($(printf '%s\n' "$err" | sed '/^[[:space:]]*$/d' | tail -n 1))"
 	done
+	exec 4>&-
 	warn "No prebuilt image to download, so it'll be built from source."
 	local src="$DIR/src"
 	rm -rf "$src"
@@ -988,7 +1068,11 @@ main() {
 		fi
 	else
 		case $ACTION in
-		update | uninstall) die "LocalLeads isn't installed in $DIR." "Pass --dir if it's somewhere else." ;;
+		update) die "LocalLeads isn't installed in $DIR." "Pass --dir if it's somewhere else." ;;
+		uninstall)
+			uninstall_leftovers
+			return
+			;;
 		esac
 		ACTION=install
 	fi
