@@ -150,7 +150,7 @@ Things you can just ask:
 
 ### 🔐 Self-hosting with HTTPS
 
-- **One-command setup:** `curl ... | bash` checks Docker, asks where to serve it, and starts it with automatic HTTPS from Let's Encrypt (via Caddy), HTTP/3 and compression. Run it again to update.
+- **One-command setup:** `curl ... | bash` downloads the release for your machine, asks where to serve it, installs Caddy if needed for automatic HTTPS from Let's Encrypt, and runs LocalLeads as a hardened systemd or launchd service. Run it again to update.
 - **Accounts:** first-run setup creates your account (Argon2id password hash); sign out and change your password from Settings.
 - **Hardened for the internet:** a one-time setup code so no stranger can claim a fresh install, sign-in lockout after repeated failures, `Secure` cookies, a Content-Security-Policy and other security headers, and a host allowlist.
 - **Small footprint:** a 194 MB image that idles at under 5 MB of RAM, runs as an unprivileged user, has a health check and shuts down cleanly.
@@ -165,31 +165,35 @@ Things you can just ask:
 
 ## ⚡ Quick start
 
-### One command (server or your own computer)
-
-You need Docker. Run this on your VPS or computer:
+### One command (Linux server or Mac)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh | bash
 ```
 
-It checks that Docker is running, asks a few questions (press Enter for the defaults), then downloads LocalLeads, starts it and prints the address and a one-time setup code for creating your account. You pick where it's served:
+That's the whole install. The script:
+
+1. downloads the latest release built for your machine (and checks its SHA-256),
+2. asks where you'll open LocalLeads (press Enter for the defaults),
+3. sets up HTTPS with [Caddy](https://caddyserver.com), installing Caddy the right way for your system if it isn't there yet (its official apt or COPR repository, pacman, zypper, or the official binary),
+4. runs LocalLeads as a service that starts on boot (systemd on Linux, launchd on macOS), as its own unprivileged user with a hardened unit,
+5. opens the ports in ufw or firewalld if they're on, and prints the address and a one-time setup code for creating your account.
 
 | Choice | You get | Needs |
 | --- | --- | --- |
 | **Your domain** | `https://leads.example.com` with a Let's Encrypt certificate, renewed on its own | A DNS `A` record pointing at the server |
 | **The server's IP** (default on Linux) | `https://203.0.113.7` with a self-signed certificate; your browser warns once | Nothing |
-| **Only this computer** (default on macOS) | `http://localhost:7878` | Nothing |
+| **Only this machine** (default on macOS) | `http://localhost:7878` | Nothing |
 | **Behind your own web server** | LocalLeads on `127.0.0.1`, plus a ready-made nginx, Caddy or Apache config to paste in | Your existing nginx, Traefik, Caddy, ... |
 
-HTTPS comes from [Caddy](https://caddyserver.com), which runs in its own container; you don't install it. If ports 80 and 443 are taken (say, by nginx), the script tells you what's using them and offers other ports or your existing web server instead.
+No Docker needed. If Caddy is already serving other sites, LocalLeads is added next to them and your Caddyfile is backed up first. If ports 80 and 443 belong to something else (say nginx), the script tells you what's using them and offers other ports or putting LocalLeads behind that web server.
 
-Run the same command again to **update**, **change settings** or **uninstall**. Your data stays in a Docker volume across updates.
+Run the same command again to **update**, **change settings** or **uninstall**. Your data stays in `/var/lib/localleads` (Linux) or `~/.localleads/data` (macOS) across updates.
 
 **Unattended**, for scripts and cloud-init (flags go after `bash -s --`):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh | bash -s -- --domain leads.example.com --yes
+curl -fsSL https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh | sudo bash -s -- --domain leads.example.com --yes
 ```
 
 <details>
@@ -197,26 +201,38 @@ curl -fsSL https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh | 
 
 | Option | What it does |
 | --- | --- |
-| `--domain NAME` | Serve at your domain with Let's Encrypt HTTPS |
-| `--ip [ADDRESS]` | Serve at the server's IP with a self-signed certificate |
-| `--local` | Only this computer, at `http://localhost:PORT` |
-| `--proxy URL` | Behind your own reverse proxy; `URL` is the address people open |
-| `--port N` | Port for `--local` and `--proxy` (default 7878) |
-| `--http-port N`, `--https-port N` | Host ports for Caddy (default 80 and 443) |
-| `--dir PATH` | Install folder (default `/opt/localleads` as root, else `~/localleads`) |
-| `--image REF` | Docker image to run (default `ghcr.io/seczoid/localleads:latest`) |
-| `--source PATH` | Build the image from a source checkout |
+| `--domain NAME` | Serve at your domain with Let's Encrypt HTTPS (Linux) |
+| `--ip [ADDRESS]` | Serve at the server's IP with a self-signed certificate (Linux) |
+| `--local` | Only this machine, at `http://localhost:PORT` |
+| `--proxy URL` | Behind your own web server; `URL` is the address people open |
+| `--port N` | Port LocalLeads listens on, on `127.0.0.1` (default 7878) |
+| `--edge` | Install the newest build of `main` instead of the latest release |
+| `--version vX.Y.Z` | Install a specific release |
+| `--binary PATH` | Install a `localleads` binary you built yourself |
+| `--no-firewall` | Leave ufw and firewalld alone |
 | `-y`, `--yes` | Don't ask; use the defaults and the options given |
 | `--update` | Update an existing install |
-| `--uninstall` | Stop and remove it; add `--delete-data` to also delete the data |
+| `--uninstall` | Remove it; add `--delete-data` to also delete the data (Caddy stays) |
+
+Supported: Linux with systemd and glibc 2.28+ (Ubuntu 20.04+, Debian 10+, RHEL/Rocky/Alma 8+, Fedora, Arch, openSUSE) on x86_64 or ARM64, and macOS 12+ on Apple silicon or Intel.
 
 </details>
 
 > Prefer to see what runs first? Download it, read it, then run it: `curl -fsSLO https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh && less setup.sh && bash setup.sh`
 
-### Docker Compose by hand
+### Download a binary
 
-If you'd rather manage the files yourself, the repo's `compose.yaml` runs LocalLeads behind Caddy:
+Every release has ready-to-run builds on the **[Releases page](https://github.com/seczoid/localleads/releases)**: Linux (x86_64, ARM64), macOS (Apple silicon, Intel) and Windows (x86_64, ARM64), with a `SHA256SUMS` file. Unpack it and run:
+
+```bash
+./localleads --open          # Windows: localleads.exe --open
+```
+
+The newest build of `main` is always on the [edge pre-release](https://github.com/seczoid/localleads/releases/tag/edge).
+
+### Docker
+
+Prefer containers? The repo's `compose.yaml` runs LocalLeads behind Caddy (images: `ghcr.io/seczoid/localleads`):
 
 ```bash
 git clone https://github.com/seczoid/localleads.git
@@ -357,6 +373,17 @@ cargo fmt
 ```
 
 Pull requests are welcome. For larger changes, please open an issue first to talk it through.
+
+### Releasing
+
+Every push to `main` rebuilds the [edge pre-release](https://github.com/seczoid/localleads/releases/tag/edge) for all six platforms. To cut a real release, bump `version` in `Cargo.toml`, commit, and push a matching tag:
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The [Release workflow](.github/workflows/release.yml) builds Linux, macOS and Windows binaries, writes `SHA256SUMS`, and publishes "LocalLeads v0.2.0" with install instructions and notes generated from the commits since the last tag. `setup.sh` installs it on the next run. The tag push also publishes the Docker image as `:0.2.0` and `:latest`.
 
 ## ⚖️ Responsible use
 

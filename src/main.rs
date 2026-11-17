@@ -96,7 +96,11 @@ async fn main() -> Result<()> {
     let database = db::Database::open(&database_path)?;
     // Anyone who can reach a fresh install could create its account, so
     // when other machines can reach it, setup needs a code from the log.
-    let exposed = !args.bind.ip().is_loopback();
+    // That's when it listens beyond localhost, or sits behind a proxy or at
+    // a public address (a proxy on the same machine connects over loopback).
+    let exposed = !args.bind.ip().is_loopback()
+        || args.behind_proxy
+        || public_url.as_ref().is_some_and(|url| !is_local_url(url));
     let setup_code = if database.has_account()? || !exposed {
         None
     } else {
@@ -153,6 +157,16 @@ async fn main() -> Result<()> {
         },
     )
     .await
+}
+
+/// `http://localhost:7878`, `http://127.0.0.1`, `http://[::1]`: this machine only.
+fn is_local_url(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(name)) => name == "localhost" || name.ends_with(".localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
 }
 
 fn parse_public_url(text: &str) -> Result<url::Url> {

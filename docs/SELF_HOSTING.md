@@ -10,38 +10,59 @@ internet ──443──▶ caddy (HTTPS, HTTP/3) ──▶ localleads:7878 ─�
 
 ## The quick way: setup.sh
 
-On the server (or your own computer), with Docker installed and running:
+On the server (or your Mac):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh | bash
 ```
 
-It checks Docker, asks where you'll open LocalLeads (your domain, the
-server's IP, only this computer, or behind your own web server), writes
-`compose.yaml`, `Caddyfile` and `.env` to `/opt/localleads` (or
-`~/localleads` when not root), downloads the image, starts it and prints the
-address and the setup code. Caddy runs in its own container, so there's
-nothing else to install.
+It downloads the latest release for the machine, verifies its checksum, asks
+where you'll open LocalLeads (your domain, the server's IP, only this
+machine, or behind your own web server), and starts it. Nothing else to
+install: if HTTPS needs Caddy and it's missing, the script installs it from
+Caddy's official apt or COPR repository (or pacman, zypper, or the official
+binary).
 
-If ports 80 and 443 are already taken, it names what's using them and offers
-other ports (fine for an IP address; a domain needs 80 or 443 free for Let's
-Encrypt) or your existing web server. In that case it prints an nginx, Caddy
-or Apache config for you to paste in, and saves it in the install folder.
+What it sets up on Linux:
 
-Run the same command again to update, change settings or uninstall. Without
-questions, for scripts:
+| What | Where |
+| --- | --- |
+| Program | `/usr/local/bin/localleads` |
+| Settings | `/etc/localleads/localleads.env` |
+| Data (SQLite) | `/var/lib/localleads/` |
+| Service | `localleads.service`, running as the `localleads` system user, sandboxed (`ProtectSystem=strict`, `NoNewPrivileges`, ...) |
+| HTTPS | Caddy, with LocalLeads in `/etc/caddy/localleads.caddy`, imported from your Caddyfile |
+
+On macOS everything lives in `~/.localleads/`, and a launchd agent starts it
+when you log in.
+
+If Caddy already serves other sites, LocalLeads is added next to them and
+the old Caddyfile is kept as `Caddyfile.before-localleads`. If ports 80 and
+443 belong to something else, the script names it and offers other ports (an
+IP address can use any; a domain needs 80 or 443 for Let's Encrypt) or
+putting LocalLeads behind that web server, with an nginx, Caddy or Apache
+config to paste in.
+
+Run the same command again to update, change settings or uninstall.
+Unattended:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh | bash -s -- --domain leads.example.com --yes
+curl -fsSL https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh | sudo bash -s -- --domain leads.example.com --yes
 ```
 
-`bash setup.sh --help` lists every option. Day to day, manage it from the
-install folder with plain `docker compose` (`logs -f localleads`, `restart`,
-`down`). The rest of this guide (backups, settings, security) applies to
-both setups; with setup.sh, run the `docker compose` commands from
-`/opt/localleads`.
+Day to day:
 
-The rest of this page sets it up by hand from the repository instead.
+```bash
+journalctl -u localleads -f       # logs (and the setup code)
+systemctl restart localleads
+sudo -u localleads env LOCALLEADS_API_KEY=ll_... localleads --db /var/lib/localleads/localleads.sqlite mcp   # stdio MCP on the server
+```
+
+`bash setup.sh --help` lists every option. The sections on settings,
+security and connecting agents below apply to both setups; backups work the
+same way from the dashboard.
+
+The rest of this page runs it with Docker instead.
 
 ## What you need
 

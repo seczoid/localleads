@@ -1,0 +1,231 @@
+# Builds LocalLeads for every platform and publishes the binaries on the
+# Releases page.
+#   - tags v1.2.3   -> release "LocalLeads v1.2.3" (the tag must match the
+#                      version in Cargo.toml)
+#   - pushes to main -> the "edge" pre-release, replaced on every push
+#
+# Asset names carry no version (localleads-x86_64-unknown-linux-gnu.tar.gz),
+# so https://github.com/<repo>/releases/latest/download/<asset> always
+# points at the newest release. setup.sh downloads from there.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  FEATURES: verify
+
+jobs:
+  check:
+    name: Check version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      channel: ${{ steps.version.outputs.channel }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          version=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag=${GITHUB_REF#refs/tags/v}
+            if [ "$tag" != "$version" ]; then
+              echo "::error::Tag v$tag doesn't match version $version in Cargo.toml. Bump Cargo.toml, commit, then tag."
+              exit 1
+            fi
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=edge" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.target }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Built on AlmaLinux 8 (glibc 2.28) so it runs on Ubuntu 20.04+,
+          # Debian 10+, RHEL/Rocky/Alma 8+, Fedora, Arch and the like.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            container: almalinux:8
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            container: almalinux:8
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+    steps:
+      - name: Build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          dnf install -y -q gcc gcc-c++ make cmake clang clang-devel perl git python3 tar gzip
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew list cmake >/dev/null 2>&1 || brew install cmake
+
+      - name: Build tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm --no-progress -y
+          "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Append
+          rustup set profile minimal
+          rustup toolchain install stable --target ${{ matrix.target }}
+
+      - uses: actions/checkout@v4
+
+      - name: Mark the checkout safe for git (container)
+        if: matrix.container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Rust target
+        shell: bash
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked --features "$FEATURES" --target ${{ matrix.target }}
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release/localleads
+          [ -f "$bin" ] || bin="$bin.exe"
+          "$bin" --version
+
+      - name: Package
+        shell: bash
+        run: |
+          name=localleads-${{ matrix.target }}
+          mkdir -p "dist/$name"
+          cp LICENSE README.md "dist/$name/"
+          if [ "${{ runner.os }}" = Windows ]; then
+            cp target/${{ matrix.target }}/release/localleads.exe "dist/$name/"
+            (cd dist && 7z a -tzip "$name.zip" "$name" >/dev/null)
+          else
+            cp target/${{ matrix.target }}/release/localleads "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+          fi
+          rm -rf "dist/$name"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          retention-days: 3
+
+  publish:
+    name: Publish
+    needs: [check, build]
+    # Publishes what built, so one failing platform doesn't hold up the rest.
+    if: ${{ !cancelled() && needs.check.result == 'success' }}
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.check.outputs.version }}
+      CHANNEL: ${{ needs.check.outputs.channel }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum localleads-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Release notes
+        run: |
+          short=${GITHUB_SHA::7}
+          if [ "$CHANNEL" = edge ]; then
+            intro="Built from \`main\` at [\`$short\`](https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA) on $(date -u +'%Y-%m-%d %H:%M UTC'). Replaced on every push; for something stable, use the [latest release](https://github.com/$GITHUB_REPOSITORY/releases/latest)."
+          else
+            intro="Self-hosted Google Maps lead finder with email enrichment, a proxy checker and an MCP server for AI agents."
+          fi
+          cat > notes.md <<EOF
+          $intro
+
+          ## Install
+
+          On a Linux server or a Mac, one command installs it, sets up HTTPS and starts it:
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/setup.sh | bash
+          \`\`\`
+
+          Or download the binary for your system below, unpack it and run \`localleads --open\`.
+
+          | System | Download |
+          | --- | --- |
+          | Linux x86_64 (glibc 2.28+) | \`localleads-x86_64-unknown-linux-gnu.tar.gz\` |
+          | Linux ARM64 (glibc 2.28+) | \`localleads-aarch64-unknown-linux-gnu.tar.gz\` |
+          | macOS Apple silicon | \`localleads-aarch64-apple-darwin.tar.gz\` |
+          | macOS Intel | \`localleads-x86_64-apple-darwin.tar.gz\` |
+          | Windows x86_64 | \`localleads-x86_64-pc-windows-msvc.zip\` |
+          | Windows ARM64 | \`localleads-aarch64-pc-windows-msvc.zip\` |
+
+          Check a download with \`sha256sum -c SHA256SUMS --ignore-missing\`. Docker image: \`ghcr.io/$GITHUB_REPOSITORY\`.
+          EOF
+          cat notes.md
+
+      - name: Publish release
+        if: env.CHANNEL == 'stable'
+        run: |
+          gh release create "v$VERSION" dist/* \
+            --title "LocalLeads v$VERSION" \
+            --notes-file notes.md \
+            --generate-notes \
+            --verify-tag
+
+      - name: Publish edge
+        if: env.CHANNEL == 'edge'
+        run: |
+          # Point the edge tag at this commit, then swap in the new files.
+          if gh api "repos/$GITHUB_REPOSITORY/git/refs/tags/edge" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/edge" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/tags/edge -f sha="$GITHUB_SHA" >/dev/null
+          fi
+          if gh release view edge >/dev/null 2>&1; then
+            gh release edit edge --title "Edge (latest main)" --notes-file notes.md --prerelease
+            # Drop files no longer built, then upload the new ones.
+            for asset in $(gh release view edge --json assets -q '.assets[].name'); do
+              [ -e "dist/$asset" ] || gh release delete-asset edge "$asset" --yes
+            done
+            gh release upload edge dist/* --clobber
+          else
+            gh release create edge dist/* --title "Edge (latest main)" --notes-file notes.md --prerelease --latest=false
+          fi
