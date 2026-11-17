@@ -355,10 +355,12 @@ check_docker() {
 				"  OrbStack        https://orbstack.dev" \
 				"  Colima          brew install colima docker docker-compose && colima start"
 		else
+			local sh="sudo sh"
+			[ "$(id -u)" != 0 ] || sh="sh"
 			die "Docker isn't installed." \
 				"Install it (the official script works on most distributions):" \
 				"" \
-				"  curl -fsSL https://get.docker.com | sudo sh" \
+				"  curl -fsSL https://get.docker.com | $sh" \
 				"" \
 				"Then run this again. Docs: https://docs.docker.com/engine/install/"
 		fi
@@ -500,7 +502,7 @@ uninstall() {
 		dc down --remove-orphans
 		ok "Stopped LocalLeads; the data is kept in the ${PROJECT}_localleads-data volume"
 		note "Run this script again to start it with the same data,"
-		note "or delete the data later with: docker volume rm ${PROJECT}_localleads-data"
+		note "or delete the data later by running it with --uninstall --delete-data."
 	fi
 	rm -f "$DIR/compose.yaml" "$DIR/Caddyfile" "$DIR/.env"
 	rm -rf "$DIR/src"
@@ -744,7 +746,7 @@ get_image() {
 			ok "Downloaded $ref"
 			return
 		fi
-		note "$ref isn't available ($(printf '%s\n' "$err" | sed '/^[[:space:]]*$/d' | tail -n 1))"
+		note "$ref isn't available ($(printf '%s\n' "$err" | sed '/^[[:space:]]*$/d' | tail -n 1 | sed 's/.*: //'))"
 	done
 	exec 4>&-
 	warn "No prebuilt image to download, so it'll be built from source."
@@ -808,6 +810,19 @@ LOCALLEADS_SETUP_CODE=$SETUP_CODE
 EOF
 	umask "$umask_was"
 
+	# Proxy checks open many connections at once, so raise the open-file
+	# limit, unless Docker can't go that high (LXC and OpenVZ VPSes often
+	# cap it, and the container then fails to start).
+	local ulimits="    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+"
+	if ! docker run --rm --entrypoint true --ulimit nofile=65536:65536 "$IMAGE" >/dev/null 2>&1; then
+		ulimits=""
+		note "Docker can't raise the open-file limit to 65536 here; using its default."
+	fi
+
 	local behind_proxy=true listen=""
 	if [ "$MODE" = local ]; then behind_proxy=false; fi
 	if ! uses_caddy; then
@@ -831,11 +846,7 @@ services:
       LOCALLEADS_SETUP_CODE: \${LOCALLEADS_SETUP_CODE:-}
     volumes:
       - localleads-data:/data
-${listen}${health}    ulimits:
-      nofile:
-        soft: 65536
-        hard: 65536
-    # Lets running searches stop cleanly; they resume as "interrupted".
+${listen}${health}${ulimits}    # Lets running searches stop cleanly; they resume as "interrupted".
     stop_grace_period: 30s
     logging:
       driver: json-file
@@ -1002,7 +1013,7 @@ finish() {
 	fi
 	if uses_caddy; then
 		say ""
-		note "If it doesn't load, open ports 80 and 443 (TCP) in your cloud provider's"
+		note "If it doesn't load, open ports $HTTP_PORT and $HTTPS_PORT (TCP) in your cloud provider's"
 		note "firewall or security group."
 	fi
 	if [ "$MODE" = proxy ]; then
