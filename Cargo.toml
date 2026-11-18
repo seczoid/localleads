@@ -48,10 +48,11 @@ regex = "1.13.1"
 rustls-platform-verifier = "0.7.1"
 # In-app updates: release versions, and unpacking the downloaded archive.
 semver = "1"
+# Unpacks the bundled place data (world.rs) and, off Windows, update archives.
+flate2 = "1"
 
 [target.'cfg(not(windows))'.dependencies]
 tar = "0.4"
-flate2 = "1"
 
 [target.'cfg(windows)'.dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }
