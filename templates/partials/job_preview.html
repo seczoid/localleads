@@ -1,8 +1,14 @@
 {% if ready %}
-<div class="preview">
-  <div class="preview-big"><span class="stat-value">{{ goal }}</span><span class="stat-label">{{ goal_label }}</span></div>
-  <p class="preview-what"><b>{{ what }}</b> in {{ place }}</p>
-  <p class="small muted">{{ coverage }}</p>
-</div>
+<dl class="plan">
+  <div><dt>Looking for</dt><dd><b>{{ what }}</b></dd></div>
+  <div><dt>Where</dt><dd>{{ place }}</dd></div>
+  <div><dt>Lookups</dt><dd><b>{{ lookups }}</b> <span class="muted">{{ lookup_math }}</span></dd></div>
+  <div><dt>Stops at</dt><dd>{{ goal }}</dd></div>
+  <div><dt>Time</dt><dd>{{ time }}</dd></div>
+  <div><dt>Collects</dt><dd>{{ collects }}</dd></div>
+  <div><dt>Proxies</dt><dd{% if !proxy_tone.is_empty() %} class="{{ proxy_tone }}"{% endif %}>{{ proxies }}</dd></div>
+</dl>
+{% else if error.is_empty() %}
+<p class="plan-empty">Type at least one business type and the plan for this search shows up here: how many lookups, how long, and what gets collected.</p>
 {% endif %}
 {% if !error.is_empty() %}<div class="callout warn">{{ error }}</div>{% endif %}

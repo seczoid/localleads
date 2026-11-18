@@ -24,7 +24,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  FEATURES: verify
+  FEATURES: ""
 
 jobs:
   check:

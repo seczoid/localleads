@@ -10,8 +10,8 @@
 
 use super::{LocalLeadsMcp, ToolResult, blocking, fail, reply};
 use crate::models::{
-    COUNTRY_OPTIONS, DEFAULT_OUTPUT_FIELDS, JobStatus, JobSummary, LocationMode,
-    LocationSelection, SearchConfig, SearchMode, country_region, country_subdivisions,
+    DEFAULT_OUTPUT_FIELDS, JobStatus, JobSummary, LocationMode,
+    LocationSelection, SearchConfig, SearchMode, country_options, country_region, country_subdivisions,
 };
 use crate::web::views::{location_summary, percent};
 use rmcp::handler::server::wrapper::Parameters;
@@ -235,14 +235,31 @@ fn clean_list(values: Vec<String>) -> Vec<String> {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct FindCategoriesParams {
+    /// Business type or its start, e.g. "dent". Leave out to list the groups.
+    #[serde(default)]
+    pub q: Option<String>,
+    /// A group key from the group list, e.g. "healthcare", to list all of
+    /// its categories. Ignored when q is given.
+    #[serde(default)]
+    pub group: Option<String>,
+    /// Most categories to return. Default 40, max 1000.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct FindCitiesParams {
     /// City name or its start, e.g. "louis". At least 2 letters.
     #[serde(default)]
     pub q: Option<String>,
-    /// A US state name or code, e.g. "Kentucky" or "KY", to list all its
+    /// A state name (or US code), e.g. "Kentucky" or "KY", to list all its
     /// cities. Ignored when q is given.
     #[serde(default)]
     pub state: Option<String>,
+    /// Country as listed by search_options. Defaults to "United States".
+    #[serde(default)]
+    pub country: Option<String>,
     /// Most cities to return. Default 40, max 1000.
     #[serde(default)]
     pub limit: Option<usize>,
@@ -466,13 +483,38 @@ pub struct DeleteSearchParams {
 
 // ------------------------------------------------------------- output
 
+/// How far a search got, like the dashboard's Google Maps stage: leads
+/// against the target, or for a "collect all" search (no target) map
+/// lookups done against planned. `None` where that wasn't recorded (a
+/// stopped "collect all" search from before lookups were tracked).
+fn progress(state: &crate::app::AppState, job: &JobSummary) -> (Option<u32>, Option<i64>) {
+    let planned = i64::try_from(job.config.lookup_count()).unwrap_or(i64::MAX);
+    let recorded = || {
+        state
+            .db
+            .done_lookups(&job.id)
+            .ok()
+            .map(|keys| i64::try_from(keys.len()).unwrap_or(i64::MAX))
+            .filter(|&done| done > 0 || job.collected == 0)
+    };
+    let done = match state.job_live_progress(&job.id) {
+        Some(live) => Some(live.lookups_done),
+        None if job.status == JobStatus::Completed => recorded().or(Some(planned)),
+        None => recorded(),
+    };
+    let percent_done = if job.status == JobStatus::Completed {
+        Some(100)
+    } else if job.total > 0 {
+        Some(percent(job.collected, job.total))
+    } else {
+        done.map(|done| percent(done, planned))
+    };
+    (percent_done, done.map(|done| done.min(planned)))
+}
+
 fn search_json(state: &crate::app::AppState, job: &JobSummary, include_config: bool) -> Value {
     let live = state.is_live(&job.id);
-    let percent_done = if job.status == JobStatus::Completed {
-        100
-    } else {
-        percent(job.collected, job.total)
-    };
+    let (percent_done, lookups_done) = progress(state, job);
     let mut value = json!({
         "id": job.id,
         "name": job.name,
@@ -487,6 +529,7 @@ fn search_json(state: &crate::app::AppState, job: &JobSummary, include_config: b
         "started_at": job.started_at,
         "finished_at": job.finished_at,
         "lookups": job.config.lookup_count(),
+        "lookups_done": lookups_done,
         "queries": job.config.queries,
         "locations": location_summary(&job.config),
         "tags": job.config.tags,
@@ -495,6 +538,11 @@ fn search_json(state: &crate::app::AppState, job: &JobSummary, include_config: b
         "can_resume": live && job.status == JobStatus::Paused,
         "can_stop": live && matches!(job.status, JobStatus::Queued | JobStatus::Running | JobStatus::Paused),
     });
+    if percent_done.is_none() {
+        value["progress_note"] = json!(
+            "Collects every result and stopped before finishing; it ran before LocalLeads recorded finished lookups, so how far it got is unknown."
+        );
+    }
     if include_config {
         value["config"] = config_json(&job.config);
     }
@@ -621,9 +669,17 @@ impl LocalLeadsMcp {
             .into_iter()
             .map(|group| json!({ "id": group.id, "name": group.name, "proxies": group.proxy_count }))
             .collect();
-        let countries: Vec<Value> = COUNTRY_OPTIONS
-            .iter()
-            .map(|country| json!({ "name": country, "states": country_subdivisions(country) }))
+        // Only the US states inline: every country's would be thousands of
+        // names. find_cities with just a country lists its states.
+        let countries: Vec<Value> = country_options()
+            .into_iter()
+            .map(|country| {
+                if crate::models::is_us(country) {
+                    json!({ "name": country, "states": country_subdivisions(country) })
+                } else {
+                    json!({ "name": country })
+                }
+            })
             .collect();
         reply(json!({
             "modes": {
@@ -633,12 +689,12 @@ impl LocalLeadsMcp {
             },
             "location_modes": {
                 "location_selection.mode=all": "Whole country: every built-in state/province",
-                "location_selection.mode=states": "Only the listed states/provinces and/or US cities (location_selection.cities, from find_cities)",
+                "location_selection.mode=states": "Only the listed states/provinces and/or cities (location_selection.cities, from find_cities)",
                 "location_selection.mode=postal_codes": "Only the listed ZIP/postal codes",
                 "locations": "Custom places: any free-form place names or coordinates",
             },
             "countries": countries,
-            "note_countries": "location_selection.country may be any country; only these have a built-in state list. A country without one is searched as a whole.",
+            "note_countries": "Every listed country splits into states/provinces, towns and (where the country has them) postal codes, like the US. Call find_cities with only country to get its states.",
             "filter_fields": FILTER_FIELDS,
             "filter_operators": FILTER_OPERATORS,
             "filter_examples": ["rating >= 4", "review_count > 20", "website not_empty", "phone is_empty", "category contains dentist", "status = OPERATIONAL", "name != Starbucks"],
@@ -646,29 +702,74 @@ impl LocalLeadsMcp {
             "proxy_groups": groups,
             "depths": {
                 "region": "one lookup per state/province",
-                "city": "one lookup per city or town (US only)",
-                "zip": "one lookup per ZIP code (US only; most results, most lookups; the default, and the only depth the dashboard uses)",
+                "city": "one lookup per city or town",
+                "zip": "one lookup per ZIP/postal code (per town in countries without postal codes; most results, most lookups; the default)",
             },
             "defaults": SearchConfig::default(),
         }))
     }
 
     #[tool(
-        description = "Find US cities for location_selection.cities (the dashboard's city picker). Pass q to search by name across all states (biggest cities first), or state to list every city of a state alphabetically. Each result's label, e.g. \"Louisville, KY\", is the value to put in cities; zips is how many ZIP codes it covers.",
+        description = "Find Google Maps business categories to use as queries (the dashboard's business type picker). Pass q to search by name (closest and most common first), group to list one group's categories, or nothing to list the groups. Queries don't have to be categories: any search text works, but categories match Google's own labels.",
+        annotations(read_only_hint = true)
+    )]
+    async fn find_categories(&self, Parameters(params): Parameters<FindCategoriesParams>) -> ToolResult {
+        let query = params.q.as_deref().map(str::trim).unwrap_or_default();
+        let group = params.group.as_deref().map(str::trim).unwrap_or_default();
+        let limit = params.limit.unwrap_or(40).clamp(1, 1000);
+        let groups = crate::categories::groups();
+        if !query.is_empty() {
+            return reply(json!({ "categories": crate::categories::search(query, limit) }));
+        }
+        if !group.is_empty() {
+            let found = groups
+                .iter()
+                .find(|g| g.key.eq_ignore_ascii_case(group) || g.label.eq_ignore_ascii_case(group))
+                .ok_or_else(|| format!("unknown group {group:?}; call find_categories with nothing to list them"))?;
+            let items: Vec<&str> = found.items.iter().take(limit).copied().collect();
+            return reply(json!({
+                "group": found.label,
+                "returned": items.len(),
+                "more": found.items.len().saturating_sub(items.len()),
+                "categories": items,
+            }));
+        }
+        let list: Vec<Value> = groups
+            .iter()
+            .map(|g| json!({ "key": g.key, "label": g.label, "categories": g.items.len() }))
+            .collect();
+        reply(json!({ "groups": list }))
+    }
+
+    #[tool(
+        description = "Find cities for location_selection.cities (the dashboard's city picker). country defaults to the United States. Pass q to search by name across the country (biggest first), state to list every city of a state alphabetically, or only country to list its states. Each result's label, e.g. \"Louisville, KY\" or \"Lyon, Auvergne-Rhone-Alpes\", is the value to put in cities; zips is how many ZIP/postal codes it covers.",
         annotations(read_only_hint = true)
     )]
     async fn find_cities(&self, Parameters(params): Parameters<FindCitiesParams>) -> ToolResult {
         let query = params.q.as_deref().map(str::trim).unwrap_or_default().to_owned();
         let state = params.state.as_deref().map(str::trim).unwrap_or_default().to_owned();
+        let country = params.country.as_deref().map(str::trim).unwrap_or_default().to_owned();
+        let us = country.is_empty() || crate::models::is_us(&country);
+        let world = if us {
+            None
+        } else {
+            Some(crate::world::country(&country).ok_or_else(|| {
+                format!("unknown country {country:?}; search_options lists them")
+            })?)
+        };
         if query.is_empty() && state.is_empty() {
-            return Err("pass q (a city name, at least 2 letters) or state (e.g. \"Kentucky\" or \"KY\")".to_owned());
+            if let Some(world) = world {
+                return reply(json!({ "country": world.name, "iso": world.iso, "states": world.states, "postal_codes": world.has_postal() }));
+            }
+            return Err("pass q (a city name, at least 2 letters), state (e.g. \"Kentucky\" or \"KY\"), or a country to list its states".to_owned());
         }
         let limit = params.limit.unwrap_or(40).clamp(1, 1000);
         let (total, cities) = blocking(move || {
-            let mut cities = if query.is_empty() {
-                crate::geo::us_cities(&state)
-            } else {
-                crate::geo::us_city_search(&query, limit)
+            let mut cities = match world {
+                Some(world) if query.is_empty() => world.cities(&state),
+                Some(world) => world.city_search(&query, limit),
+                None if query.is_empty() => crate::geo::us_cities(&state),
+                None => crate::geo::us_city_search(&query, limit),
             };
             let total = cities.len();
             cities.truncate(limit);
@@ -719,7 +820,7 @@ impl LocalLeadsMcp {
     }
 
     #[tool(
-        description = "List searches, newest first, with status and progress (collected, target, percent, failures, duplicates) and whether this server can pause/resume/stop them. Filter by status.",
+        description = "List searches, newest first, with status and progress (collected, target, percent, lookups and lookups_done, failures, duplicates; percent counts lookups when the target is \"all\") and whether this server can pause/resume/stop them. Filter by status.",
         annotations(read_only_hint = true)
     )]
     async fn list_searches(&self, Parameters(params): Parameters<ListSearchesParams>) -> ToolResult {
@@ -775,7 +876,7 @@ impl LocalLeadsMcp {
     }
 
     #[tool(
-        description = "Stop a queued, running or paused search for good. Leads collected so far are kept. It moves to stopping, then cancelled.",
+        description = "Stop a queued, running or paused search. Leads collected so far are kept. It moves to stopping, then cancelled; continue_search carries it on later from the areas it had not finished.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true)
     )]
     async fn stop_search(&self, Parameters(params): Parameters<SearchIdParams>) -> ToolResult {
@@ -788,7 +889,18 @@ impl LocalLeadsMcp {
     }
 
     #[tool(
-        description = "Delete a finished search and its event log. With delete_leads=true, also delete the leads it found first (leads other searches also found are kept). Cannot be undone. Stop active searches first.",
+        description = "Carry on a stopped, cancelled or failed search from where it stopped: areas it already finished are skipped, the rest are searched with the same settings, in the same search (unlike rerun_search, which starts over as a new one). Not for running or completed searches.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn continue_search(&self, Parameters(params): Parameters<SearchIdParams>) -> ToolResult {
+        let job = self.load_job(&params.id)?;
+        self.state.continue_job(&job.id).map_err(fail)?;
+        self.state.mark_jobs_dirty();
+        reply(json!({ "id": job.id, "name": job.name, "status": "running" }))
+    }
+
+    #[tool(
+        description = "Delete a finished search and its event log. With delete_leads=true, also delete the leads it found first (leads other searches also found are kept). Stop active searches first. Returns an undo_id: undo_delete brings it all back within 60 minutes.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn delete_search(&self, Parameters(params): Parameters<DeleteSearchParams>) -> ToolResult {
@@ -799,6 +911,7 @@ impl LocalLeadsMcp {
         let state = self.state.clone();
         let id = job.id.clone();
         let removed = blocking(move || state.db.delete_job(&id, params.delete_leads)).await?;
+        let (undo_id, removed) = (removed.undo, removed.count);
         self.state.notice(
             "ok",
             if removed > 0 {
@@ -808,6 +921,6 @@ impl LocalLeadsMcp {
             },
         );
         self.state.mark_jobs_dirty();
-        reply(json!({ "deleted": job.id, "name": job.name, "leads_deleted": removed }))
+        reply(json!({ "deleted": job.id, "name": job.name, "leads_deleted": removed, "undo_id": super::undo_id(1, undo_id) }))
     }
 }

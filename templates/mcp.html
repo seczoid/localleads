@@ -1,146 +1,125 @@
 {% extends "base.html" %}
-{% block title %}MCP{% endblock %}
-{% block heading %}<h1>MCP</h1><span class="muted">Connect an AI agent</span>{% endblock %}
+{% block title %}Agents{% endblock %}
+{% block heading %}<h1>Agents</h1>{% endblock %}
+{% block sub %}<p class="page-sub">Let Claude, Codex, Cursor and other AI agents run searches and read your leads. What they do shows up here live.</p>{% endblock %}
 {% block actions %}<a class="btn" href="/docs#mcp">Read the guide</a>{% endblock %}
 {% block content %}
-<section class="card mcp-hero">
-  <div class="mcp-hero-text">
-    <span class="list-kicker">Model Context Protocol</span>
-    <h2 class="mcp-title">Let Claude, Codex, Cursor and other agents run your searches</h2>
-    <p class="muted">Every dashboard feature is an MCP tool: start a search, watch it, browse and filter leads, export them, manage proxies. Whatever an agent does shows up here live.</p>
-    <ol class="steps">
-      <li><b>1</b><span>Create an API key</span></li>
-      <li><b>2</b><span>Pick your agent and paste its setup</span></li>
-      <li><b>3</b><span>Ask it to find leads</span></li>
-    </ol>
-  </div>
-  <dl class="kv mcp-facts">
-    <dt>Command</dt><dd class="mono break">{{ command }}</dd>
-    <dt>HTTP endpoint</dt><dd class="mono break">{{ endpoint }}</dd>
-    <dt>Tools</dt><dd>{{ tool_count }} tools in 4 areas</dd>
-    <dt>Database</dt><dd class="mono break">{{ db_path }}</dd>
-  </dl>
-</section>
-
-<section class="card" id="keys">
-  <header class="card-head"><h2>API keys</h2><span class="muted small">{{ keys.len() }} active</span></header>
-  <p class="hint">Agents need an API key to use LocalLeads, over stdio and over HTTP. Make one per agent or machine, so you can revoke one without touching the others. Keys are stored hashed, so each is shown only once.</p>
-  {% if !new_key.is_empty() %}
-  <div class="new-key" role="status">
-    <div class="snippet">
-      <div class="snippet-head"><span>New key “{{ key_name }}”. Copy it now: it won't be shown again.</span><button type="button" class="btn sm" data-copy>Copy</button></div>
-      <pre><code>{{ new_key }}</code></pre>
-    </div>
-    <p class="hint">The setup snippets below already include this key.</p>
-  </div>
-  {% endif %}
-  <form method="post" action="/agents/keys" hx-push-url="/agents" class="key-form">
-    <input name="name" placeholder="Name, e.g. Claude Code on my laptop" maxlength="80" aria-label="Key name">
-    <button class="btn primary">Create API key</button>
-  </form>
-  {% if !keys.is_empty() %}
-  <div class="table-wrap">
-    <table class="table">
-      <thead><tr><th>Name</th><th>Key</th><th>Created</th><th>Last used</th><th></th></tr></thead>
-      <tbody>
-        {% for key in keys %}
-        <tr>
-          <td>{{ key.name }}</td>
-          <td class="mono">{{ key.shown }}…</td>
-          <td>{{ key.created }}</td>
-          <td>{{ key.last_used }}</td>
-          <td class="right">
-            <form method="post" action="/agents/keys/{{ key.id }}/revoke" hx-confirm="Revoke “{{ key.name }}”? Agents using it stop working right away.">
-              <button class="btn sm danger">Revoke</button>
-            </form>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% endif %}
-</section>
-
-{% if in_build_folder %}
-<div class="callout info">
-  <span>This copy runs from a cargo build folder, so the commands below point there. Rebuilding keeps that path; <code>cargo clean</code> removes it. For a path that never changes, run <code>cargo install --path .</code> and copy the setup from the installed copy.</span>
-</div>
-{% endif %}
-
-{% if !remote %}
-<section class="card">
-  <header class="card-head"><h2>Fastest: set up Claude Code, Codex and Cursor in one go</h2></header>
-  <div class="snippet">
-    <div class="snippet-head"><span>Run in a terminal</span><button type="button" class="btn sm" data-copy>Copy</button></div>
-    <pre><code>{{ install }}</code></pre>
-  </div>
-  <p class="hint">Registers LocalLeads with every one of those three that's installed, with a new API key, and leaves your other servers alone. Restart the agent afterwards. Leave off <code>--write</code> to only print the setup.</p>
-</section>
-{% endif %}
-
-<section class="card" x-data="{ client: 'claude-code', mode: '{% if remote %}http{% else %}stdio{% endif %}' }">
-  <header class="card-head">
-    <h2>Set up one agent</h2>
-    <div class="segmented compact" role="radiogroup" aria-label="Connection">
-      <label :class="mode === 'stdio' && 'on'"><input type="radio" value="stdio" x-model="mode">Launch it (stdio)</label>
-      <label :class="mode === 'http' && 'on'"><input type="radio" value="http" x-model="mode">Connect to this server (HTTP)</label>
-    </div>
-  </header>
-  {% if new_key.is_empty() %}
-  <div class="callout info"><span>Replace <code>YOUR_API_KEY</code> below with a key from <a href="#keys">API keys</a>, or create one and the snippets fill it in.</span></div>
-  {% endif %}
-  {% if remote %}
-  <p class="hint" x-show="mode === 'stdio'">These commands run LocalLeads on the server itself, so they only work for an agent on the same machine (or through <code>docker compose exec -T localleads localleads mcp</code>). From your own computer, use HTTP.</p>
-  {% else %}
-  <p class="hint" x-show="mode === 'stdio'">Recommended. The agent starts LocalLeads itself. While this dashboard is running it hands everything to it, so searches keep going after the agent closes; otherwise it runs searches on its own.</p>
-  {% endif %}
-  <p class="hint" x-show="mode === 'http'" x-cloak>The agent talks to this running dashboard at <code>{{ endpoint }}</code>. Keep the dashboard running while you use it.</p>
-
-  <div class="agent-picker">
-    <nav class="client-list" aria-label="Agents">
-      {% for client in clients %}
-      <button type="button" :class="client === '{{ client.id }}' && 'on'" @click="client = '{{ client.id }}'">
-        <span class="client-name">{{ client.name }}</span>
-        <span class="client-kind">{{ client.kind }}</span>
-      </button>
-      {% endfor %}
-    </nav>
-    <div class="client-panel">
-      {% for client in clients %}
-      <div x-show="client === '{{ client.id }}'" {% if !loop.first %}x-cloak{% endif %}>
-        <h3 class="client-title">{{ client.name }}</h3>
-        <div x-show="mode === 'stdio'">
-          {% for snippet in client.stdio %}
-          <div class="snippet">
-            <div class="snippet-head"><span>{{ snippet.label }}</span><button type="button" class="btn sm" data-copy>Copy</button></div>
-            <pre><code>{{ snippet.code }}</code></pre>
-          </div>
-          {% endfor %}
-        </div>
-        <div x-show="mode === 'http'" x-cloak>
-          {% if client.http.is_empty() %}
-          <div class="callout info"><span>{{ client.http_note }}</span></div>
-          {% else %}
-          {% for snippet in client.http %}
-          <div class="snippet">
-            <div class="snippet-head"><span>{{ snippet.label }}</span><button type="button" class="btn sm" data-copy>Copy</button></div>
-            <pre><code>{{ snippet.code }}</code></pre>
-          </div>
-          {% endfor %}
-          {% endif %}
-        </div>
-        <p class="client-check"><span class="reach-dot safe"></span>{{ client.check }}</p>
-        <p class="hint">Config file already has other servers? Add only the <code>localleads</code> entry inside the existing block.</p>
+<div class="agents-page">
+  <section class="step" id="keys">
+    <header class="step-head"><span class="step-n" aria-hidden="true">1</span><h2>Create an API key</h2>{% if !keys.is_empty() %}<span class="muted small">{{ keys.len() }} active</span>{% endif %}</header>
+    <p class="hint">Make one key per agent or computer, so you can revoke one without touching the others. Each key is shown only once.</p>
+    {% if !new_key.is_empty() %}
+    <div class="new-key" role="status">
+      <div class="snippet">
+        <div class="snippet-head"><span>New key “{{ key_name }}”. Copy it now: it won't be shown again.</span><button type="button" class="btn sm" data-copy>Copy</button></div>
+        <pre><code>{{ new_key }}</code></pre>
       </div>
-      {% endfor %}
+      <p class="hint">The setup in step 2 already includes this key.</p>
     </div>
-  </div>
-</section>
+    {% endif %}
+    <form method="post" action="/agents/keys" hx-push-url="/agents" class="key-form">
+      <input name="name" placeholder="Name, e.g. Claude Code on my laptop" maxlength="80" aria-label="Key name">
+      <button class="btn{% if keys.is_empty() %} primary{% endif %}">Create API key</button>
+    </form>
+    {% if !keys.is_empty() %}
+    <div class="table-panel">
+      <table class="table stack-sm">
+        <thead><tr><th>Name</th><th>Key</th><th>Created</th><th>Last used</th><th class="actions-col"><span class="sr-only">Actions</span></th></tr></thead>
+        <tbody>
+          {% for key in keys %}
+          <tr>
+            <td data-label="" class="strong">{{ key.name }}</td>
+            <td data-label="Key" class="mono">{{ key.shown }}…</td>
+            <td data-label="Created">{{ key.created }}</td>
+            <td data-label="Last used">{{ key.last_used }}</td>
+            <td class="actions-col">
+              <form method="post" action="/agents/keys/{{ key.id }}/revoke" hx-confirm="Revoke “{{ key.name }}”? Agents using it stop working right away.">
+                <button class="btn sm danger ghost">Revoke</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </section>
 
-<div class="grid-2 align-start">
-  <section class="card">
-    <header class="card-head"><h2>Try asking</h2></header>
+  <section class="step" x-data="{ client: 'claude-code', mode: '{% if remote %}http{% else %}stdio{% endif %}' }">
+    <header class="step-head"><span class="step-n" aria-hidden="true">2</span><h2>Connect your agent</h2></header>
+
+    {% if !remote %}
+    <div class="snippet">
+      <div class="snippet-head"><span>Fastest: set up Claude Code, Codex and Cursor in one go. Run this in a terminal.</span><button type="button" class="btn sm" data-copy>Copy</button></div>
+      <pre><code>{{ install }}</code></pre>
+    </div>
+    <p class="hint">Adds LocalLeads to each of those three that's installed, with a new API key, and leaves your other servers alone. Restart the agent afterwards. Leave off <code>--write</code> to only print the setup.</p>
+    {% endif %}
+    {% if in_build_folder %}
+    <div class="callout info"><span>This copy runs from a cargo build folder, so the commands point there. Rebuilding keeps that path; <code>cargo clean</code> removes it. For a path that never changes, run <code>cargo install --path .</code> and copy the setup from the installed copy.</span></div>
+    {% endif %}
+
+    <div class="agent-setup">
+      <div class="agent-setup-head">
+        <h3>{% if remote %}Set up an agent{% else %}Or set up one agent by hand{% endif %}</h3>
+        <div class="segmented compact" role="radiogroup" aria-label="Connection">
+          <label :class="mode === 'stdio' && 'on'"><input type="radio" value="stdio" x-model="mode">Launch it (stdio)</label>
+          <label :class="mode === 'http' && 'on'"><input type="radio" value="http" x-model="mode">Connect over HTTP</label>
+        </div>
+      </div>
+      {% if new_key.is_empty() %}
+      <p class="hint">Replace <code>YOUR_API_KEY</code> with a key from step 1, or create one and the setup fills it in.</p>
+      {% endif %}
+      {% if remote %}
+      <p class="hint" x-show="mode === 'stdio'">These commands run LocalLeads on the server itself, so they only work for an agent on the same machine (or through <code>docker compose exec -T localleads localleads mcp</code>). From your own computer, use HTTP.</p>
+      {% else %}
+      <p class="hint" x-show="mode === 'stdio'">Recommended. The agent starts LocalLeads itself. While this app is running it hands everything to it, so searches keep going after the agent closes.</p>
+      {% endif %}
+      <p class="hint" x-show="mode === 'http'" x-cloak>The agent talks to this running app at <code>{{ endpoint }}</code>. Keep it running while you use the agent.</p>
+
+      <div class="agent-picker">
+        <nav class="client-list" aria-label="Agents">
+          {% for client in clients %}
+          <button type="button" :class="client === '{{ client.id }}' && 'on'" @click="client = '{{ client.id }}'">
+            <span class="client-name">{{ client.name }}</span>
+            <span class="client-kind">{{ client.kind }}</span>
+          </button>
+          {% endfor %}
+        </nav>
+        <div class="client-panel">
+          {% for client in clients %}
+          <div x-show="client === '{{ client.id }}'" {% if !loop.first %}x-cloak{% endif %}>
+            <div x-show="mode === 'stdio'">
+              {% for snippet in client.stdio %}
+              <div class="snippet">
+                <div class="snippet-head"><span>{{ snippet.label }}</span><button type="button" class="btn sm" data-copy>Copy</button></div>
+                <pre><code>{{ snippet.code }}</code></pre>
+              </div>
+              {% endfor %}
+            </div>
+            <div x-show="mode === 'http'" x-cloak>
+              {% if client.http.is_empty() %}
+              <div class="callout info"><span>{{ client.http_note }}</span></div>
+              {% else %}
+              {% for snippet in client.http %}
+              <div class="snippet">
+                <div class="snippet-head"><span>{{ snippet.label }}</span><button type="button" class="btn sm" data-copy>Copy</button></div>
+                <pre><code>{{ snippet.code }}</code></pre>
+              </div>
+              {% endfor %}
+              {% endif %}
+            </div>
+            <p class="client-check"><span class="reach-dot safe"></span>{{ client.check }}</p>
+            <p class="hint">Config file already has other servers? Add only the <code>localleads</code> entry inside the existing block.</p>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="step">
+    <header class="step-head"><span class="step-n" aria-hidden="true">3</span><h2>Ask it to find leads</h2></header>
     <ul class="prompt-list">
       <li data-copy-text>Find 500 roofers in Austin, TX with websites and emails, and tell me when it's done.</li>
       <li data-copy-text>How is my latest search doing? How many leads have an email so far?</li>
@@ -150,32 +129,42 @@
     </ul>
     <p class="hint">Click one to copy it.</p>
   </section>
-  <section class="card">
-    <header class="card-head"><h2>Good to know</h2></header>
-    <ul class="notes">
-      <li>Agents ask before deleting anything: delete tools are marked as destructive.</li>
-      <li>Searches started by an agent appear under <a href="/jobs">Searches</a> like any other, with live progress.</li>
-      <li>Big lead lists come in pages of up to 1,000; agents export to a file for anything larger.</li>
-      <li>Stdio agents pass the key in <code>LOCALLEADS_API_KEY</code>; HTTP agents send <code>Authorization: Bearer &lt;key&gt;</code> (or <code>X-API-Key</code>).</li>
-      <li>Getting “invalid API key”? The key was revoked or mistyped. Create a new one and update the agent's config.</li>
-      <li>Not connecting? Restart the agent after adding the config, and check the command path above still exists.</li>
-    </ul>
+
+  <section class="agents-ref">
+    <details class="disclosure">
+      <summary>Connection details</summary>
+      <dl class="kv">
+        <dt>Command</dt><dd class="mono break">{{ command }}</dd>
+        <dt>HTTP endpoint</dt><dd class="mono break">{{ endpoint }}</dd>
+        <dt>Database</dt><dd class="mono break">{{ db_path }}</dd>
+        <dt>API key</dt><dd>Stdio agents pass it in <code>LOCALLEADS_API_KEY</code>; HTTP agents send <code>Authorization: Bearer &lt;key&gt;</code> (or <code>X-API-Key</code>).</dd>
+      </dl>
+    </details>
+    <details class="disclosure">
+      <summary>Troubleshooting and limits</summary>
+      <ul class="notes">
+        <li>Getting “invalid API key”? The key was revoked or mistyped. Create a new one and update the agent's config.</li>
+        <li>Not connecting? Restart the agent after adding the config, and check the command path above still exists.</li>
+        <li>Agents ask before deleting anything: delete tools are marked as destructive. A delete can still be undone for an hour, from the notice here or by asking the agent.</li>
+        <li>Searches started by an agent appear under <a href="/">Searches</a> like any other, with live progress.</li>
+        <li>Big lead lists come in pages of up to 1,000; agents export to a file for anything larger.</li>
+      </ul>
+    </details>
+    <details class="disclosure">
+      <summary>The {{ tool_count }} tools agents get</summary>
+      <div class="tool-groups">
+        {% for group in groups %}
+        <div class="tool-group">
+          <h3>{{ group.name }} <span class="count">{{ group.tools.len() }}</span></h3>
+          <dl>
+            {% for (name, description) in group.tools %}
+            <dt><code>{{ name }}</code></dt><dd>{{ description }}</dd>
+            {% endfor %}
+          </dl>
+        </div>
+        {% endfor %}
+      </div>
+    </details>
   </section>
 </div>
-
-<section class="card">
-  <header class="card-head"><h2>Tools agents get</h2><span class="muted small">{{ tool_count }} tools</span></header>
-  <div class="tool-groups">
-    {% for group in groups %}
-    <div class="tool-group">
-      <h3>{{ group.name }} <span class="count">{{ group.tools.len() }}</span></h3>
-      <dl>
-        {% for (name, description) in group.tools %}
-        <dt><code>{{ name }}</code></dt><dd>{{ description }}</dd>
-        {% endfor %}
-      </dl>
-    </div>
-    {% endfor %}
-  </div>
-</section>
 {% endblock %}

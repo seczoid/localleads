@@ -19,9 +19,12 @@ curl -fsSL https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh | 
 It downloads the latest release for the machine, verifies its checksum, asks
 where you'll open LocalLeads (your domain, the server's IP, only this
 machine, or behind your own web server), and starts it. Nothing else to
-install: if HTTPS needs Caddy and it's missing, the script installs it from
-Caddy's official apt or COPR repository (or pacman, zypper, or the official
-binary).
+install: on a Linux server, if HTTPS needs Caddy and it's missing, the script
+installs it with the distro's package manager (Caddy's own apt repository on
+Debian/Ubuntu, its COPR repository on Fedora/RHEL, pacman on Arch, zypper on
+openSUSE) or, failing those, Caddy's official binary. On a Mac it never
+installs Caddy: there it listens on localhost only, or sits behind a web
+server you already run.
 
 What it sets up on Linux:
 
@@ -115,7 +118,7 @@ password, restore a backup or start over with a new volume.
 
 Agents connect to `https://leads.example.com/mcp` with an API key:
 
-1. Open **MCP** in the sidebar, name a key and create it. It's shown once.
+1. Open **Agents** in the sidebar, name a key and create it. It's shown once.
 2. Pick your agent. The page shows its setup with your URL and key filled in.
 
 Every MCP request needs `Authorization: Bearer <key>` (or `X-API-Key: <key>`).
@@ -135,7 +138,8 @@ docker compose up -d --build
 ```
 
 The database schema upgrades itself on start. Searches that were running when
-the container stopped are marked interrupted; resume them from the dashboard.
+the container stopped carry on by themselves once it is back, from where they
+left off.
 
 ## Back up and restore
 

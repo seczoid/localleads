@@ -1,28 +1,72 @@
 {% extends "base.html" %}
 {% block title %}{{ job.name }}{% endblock %}
-{% block heading %}<a class="crumb" href="/jobs">Searches</a><h1>{{ job.name }}</h1>{% endblock %}
+{% block heading %}<a class="crumb" href="/">Searches</a><h1>{{ job.name }}</h1><span id="job-status" class="page-badges">{% include "partials/job_status.html" %}</span>{% endblock %}
+{% block sub %}<p class="page-sub">{{ job.queries }}{% if !job.locations.is_empty() %}<span class="sep">·</span>{{ job.locations }}{% endif %}</p>{% endblock %}
 {% block actions %}
-  <a class="btn" href="/leads/export.csv?source={{ job.id }}" hx-boost="false">Export CSV</a>
-  <a class="btn" href="/leads/export.json?source={{ job.id }}" hx-boost="false">JSON</a>
-  <a class="btn" href="/jobs/new?from={{ job.id }}">Duplicate</a>
+<span id="job-controls" class="row-actions">{% include "partials/job_controls.html" %}</span>
+<div class="menu-wrap" x-data="{ open: false }" @click.outside="open = false">
+  <button type="button" class="btn" @click="open = !open" :aria-expanded="open">Export
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
+  <div class="menu right" x-show="open" x-cloak x-transition.opacity>
+    <a href="/leads/export.csv?source={{ job.id }}" hx-boost="false">Download CSV</a>
+    <button type="button" @click="open = false; llCsvColumns('source={{ job.id }}')">Choose CSV columns…</button>
+    <a href="/leads/export.json?source={{ job.id }}" hx-boost="false">Download JSON</a>
+  </div>
+</div>
+<a class="btn primary" href="/leads?source={{ job.id }}">Open leads</a>
+{% include "partials/job_menu.html" %}
 {% endblock %}
 {% block content %}
-<div id="job-live" hx-get="/jobs/{{ job.id }}/live" hx-trigger="jobs-changed from:body" hx-swap="innerHTML">
-  {% include "partials/job_live.html" %}
+<div id="job-live" hx-get="/jobs/{{ job.id }}/live" hx-trigger="jobs-changed from:body throttle:1s" hx-swap="innerHTML">
+  {% include "partials/job_band.html" %}
 </div>
 
-<div class="grid-2 align-start">
-  <section class="card">
-    <header class="card-head"><h2>Configuration</h2></header>
-    <dl class="kv">
-      {% for row in config %}<dt>{{ row.0 }}</dt><dd>{{ row.1 }}</dd>{% endfor %}
-    </dl>
+<div class="tabbed" x-data="{ tab: ['leads', 'activity', 'setup'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'leads', show(name) { this.tab = name; history.replaceState(history.state, '', '#' + name); } }">
+  <div class="tabbar" role="tablist" aria-label="Search sections">
+    <button type="button" role="tab" :aria-selected="tab === 'leads'" @click="show('leads')">Leads</button>
+    <button type="button" role="tab" :aria-selected="tab === 'activity'" @click="show('activity')">Activity</button>
+    <button type="button" role="tab" :aria-selected="tab === 'setup'" @click="show('setup')">Setup</button>
+  </div>
+
+  <section role="tabpanel" x-show="tab === 'leads'" class="tab-panel">
+    <p class="muted small panel-note">Newest first. Click a lead for its details; to filter, select or export a slice, <a href="/leads?source={{ job.id }}">open these leads in Leads</a>.</p>
+    <div class="table-panel">
+      <table class="table hover leads-table stack-sm" data-leads-table hx-history="false" data-select="0" data-params="source={{ job.id }}" data-live="1"></table>
+    </div>
   </section>
-  <section class="card">
-    <header class="card-head"><h2>Leads from this search</h2><a class="link" href="/leads/browse?source={{ job.id }}">Open lead list →</a></header>
-    <table class="table hover leads-table" data-leads-table hx-history="false" data-compact="1" data-params="source={{ job.id }}" data-live="1">
-      <thead><tr><th>Business</th><th>Location</th><th>Phone</th><th>Website</th><th>Email</th><th class="num">Rating</th></tr></thead>
-    </table>
+
+  <section role="tabpanel" x-show="tab === 'activity'" x-cloak class="tab-panel" x-data="jobLog('{{ job.id }}')">
+    <div class="toolbar wrap log-tools">
+      <input type="search" class="grow" placeholder="Find in the log…" aria-label="Find in the log" x-model.debounce.150ms="q" @keydown.escape="q = ''">
+      <select aria-label="Show" x-model="level">
+        <option value="">All lines</option>
+        <option value="error">Errors only</option>
+        <option value="info">Info only</option>
+      </select>
+      <button type="button" class="btn sm" @click="copyAll()" :disabled="!matches">Copy <span x-text="filtered ? 'shown' : 'all'">all</span></button>
+      <a class="btn sm" :href="downloadUrl()" href="/jobs/{{ job.id }}/log.txt" hx-boost="false" download>Download .txt</a>
+    </div>
+    <div x-show="!history"><ol id="job-events" class="log tall">{% include "partials/job_events.html" %}</ol></div>
+    <div x-show="history" x-cloak><ol id="job-events-history" class="log tall" aria-live="polite"></ol></div>
+    <p class="log-none muted small" x-show="filtered && !matches" x-cloak>No lines match. <button type="button" class="link" @click="q = ''; level = ''">Clear the filter</button></p>
+    <div class="log-foot muted small">
+      <span x-text="summary()"></span>
+      <button type="button" class="link" x-show="canShowOlder()" x-cloak @click="older()" :disabled="loading" x-text="loading ? 'Loading…' : 'Show older'">Show older</button>
+      <button type="button" class="link" x-show="history" x-cloak @click="backToLive()">Back to live</button>
+    </div>
+  </section>
+
+  <section role="tabpanel" x-show="tab === 'setup'" x-cloak class="tab-panel setup">
+    <p class="setup-sentence">{{ setup }}</p>
+    <div class="row-actions">
+      <a class="btn sm" href="/jobs/new?from={{ job.id }}">Duplicate and edit</a>
+    </div>
+    <details class="disclosure">
+      <summary>Show all settings</summary>
+      <dl class="kv">
+        {% for row in config %}<dt>{{ row.0 }}</dt><dd>{{ row.1 }}</dd>{% endfor %}
+      </dl>
+    </details>
   </section>
 </div>
 {% endblock %}

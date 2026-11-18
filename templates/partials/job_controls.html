@@ -1,0 +1,4 @@
+{% if job.can_pause %}<button class="btn sm" hx-post="/jobs/{{ job.id }}/pause">Pause</button>{% endif %}
+{% if job.can_resume %}<button class="btn sm" hx-post="/jobs/{{ job.id }}/pause">Resume</button>{% endif %}
+{% if job.can_stop %}<button class="btn sm danger" hx-post="/jobs/{{ job.id }}/stop" hx-confirm="Stop this search? Leads collected so far are kept, and you can continue it later.">Stop</button>{% endif %}
+{% if job.can_continue %}<button class="btn sm" hx-post="/jobs/{{ job.id }}/continue" title="Carry on from where it stopped: finished areas are skipped">Continue</button>{% endif %}

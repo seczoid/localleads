@@ -2,10 +2,11 @@
 {% block title %}Proxies{% endblock %}
 {% block heading %}<h1>Proxies</h1>{% endblock %}
 {% block actions %}
+  <button type="button" class="btn" @click="$dispatch('open-dialog', 'checker')">Checker settings</button>
   <button type="button" class="btn primary" @click="$dispatch('open-dialog', 'add')">Add proxies</button>
 {% endblock %}
 {% block content %}
-<div x-data="{ dialog: null, addTab: 'paste' }" @open-dialog.window="dialog = $event.detail" @close-dialog.window="dialog = null" @keydown.escape.window="dialog = null">
+<div class="proxies-page" x-data="{ dialog: null, addTab: 'paste' }" @open-dialog.window="dialog = $event.detail" @close-dialog.window="dialog = null" @keydown.escape.window="dialog = null">
 
   <div id="proxy-groups" hx-get="/partials/proxy-groups?group={{ filters.group }}" hx-trigger="proxies-changed from:body">
     {{ tabs|safe }}
@@ -14,6 +15,8 @@
   <div id="proxy-progress" hx-get="/partials/proxy-progress" hx-trigger="proxies-changed from:body, proxy-progress from:body">
     {{ progress|safe }}
   </div>
+
+  {% include "partials/proxy_offer.html" %}
 
   <section class="card" x-data="proxyTable()" @selection-clear.window="clear()">
     <div class="list-head">
@@ -39,7 +42,7 @@
                 :disabled="matching === 0" x-text="matching === 0 ? 'Check' : 'Check ' + matching.toLocaleString()">Check all</button>
         <div class="menu-wrap" x-data="{ open: false }" @click.outside="open = false">
           <button type="button" class="btn icon-only" @click="open = !open" aria-label="More actions" title="More actions">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Zm7 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Zm7 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z"/></svg>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-more"/></svg>
           </button>
           <div class="menu" x-show="open" x-cloak x-transition.opacity @click="open = false">
             <button class="danger" hx-post="/proxies/bulk" hx-include="#proxy-filters" hx-vals='{"action": "delete_failed"}'
@@ -65,7 +68,7 @@
       <button class="btn sm" name="action" value="disable">Disable</button>
       <div class="menu-wrap" x-data="{ open: false }" @click.outside="open = false">
         <button type="button" class="btn sm" @click="open = !open">Group
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5H7Z"/></svg></button>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
         <div class="menu" x-show="open" x-cloak x-transition.opacity>
           {% for group in all_groups %}
           <button name="action" value="assign" @click="$el.form.elements.target_group.value = '{{ group.id }}'; open = false">Add to {{ group.name }}</button>
@@ -91,40 +94,22 @@
     </table>
   </section>
 
-  <details class="card">
-    <summary class="card-head"><h2>Checker settings</h2><span class="muted small">{{ checker.concurrency }} at once · {{ checker.timeout_secs }}s timeout · {{ checker.retries }} retries</span></summary>
-    <form hx-post="/proxies/settings" class="settings-form">
-      <label class="field"><span>Test endpoint</span><input name="endpoint" value="{{ checker.endpoint }}"></label>
-      <div class="row-3">
-        <label class="field"><span>Checks at once <em>1–2048</em></span><input type="number" min="1" max="2048" name="concurrency" value="{{ checker.concurrency }}"></label>
-        <label class="field"><span>Timeout (seconds)</span><input type="number" min="1" max="120" name="timeout_secs" value="{{ checker.timeout_secs }}"></label>
-        <label class="field"><span>Retries</span><input type="number" min="0" max="5" name="retries" value="{{ checker.retries }}"></label>
-      </div>
-      <div class="row-3">
-        <label class="field"><span>Slow after (ms)</span><input type="number" min="1" max="120000" name="max_latency_ms" value="{{ checker.max_latency_ms }}"></label>
-        <label class="field"><span>Expected body text</span><input name="expected_body" value="{{ checker.expected_body }}"></label>
-        <label class="check end"><input type="checkbox" name="verify_exit_ip" {% if checker.verify_exit_ip %}checked{% endif %}> Record exit IP via api.ipify.org</label>
-      </div>
-      <p class="hint">A proxy is healthy when most attempts reach the endpoint and find the expected text under the slow threshold. A proxy that can't be reached on the first attempt fails at once, without retries. More checks at once finish sooner; 500–1000 works well on most connections.</p>
-      <button class="btn primary">Save settings</button>
-    </form>
-  </details>
 
-  <!-- dialogs -->
-  <div class="modal-backdrop" x-show="dialog === 'add'" x-cloak x-transition.opacity @click.self="dialog = null">
-    <div class="modal">
-      <header class="modal-head"><h2>Add proxies</h2><button type="button" class="icon-btn" @click="dialog = null" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg></button></header>
-      <div class="modal-tabs">
+  <div class="drawer-root is-task" x-show="dialog === 'add'" x-cloak>
+    <div class="drawer-scrim" @click="dialog = null"></div>
+    <aside class="drawer narrow" role="dialog" aria-labelledby="add-title">
+      <header class="drawer-head"><h2 id="add-title">Add proxies</h2><span class="spacer"></span><button type="button" class="icon-btn" @click="dialog = null" aria-label="Close"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></header>
+      <div class="drawer-tabs">
         <div class="segmented" role="tablist">
           <label :class="addTab === 'paste' && 'on'"><input type="radio" value="paste" x-model="addTab">Paste a list</label>
           <label :class="addTab === 'file' && 'on'"><input type="radio" value="file" x-model="addTab">Upload a file</label>
         </div>
       </div>
-      <form x-show="addTab === 'paste'" hx-post="/proxies/add" @htmx:after-request="if ($event.detail.successful) $el.reset()">
-        <div class="modal-body">
+      <form class="drawer-form" x-show="addTab === 'paste'" hx-post="/proxies/add" @htmx:after-request="if ($event.detail.successful) { $el.reset(); dialog = null }">
+        <div class="drawer-body">
           <label class="field">
             <span>Proxies <em>one per line</em></span>
-            <textarea name="text" rows="8" class="mono" placeholder="http://user:pass@host:8080&#10;socks5://host:1080&#10;host:3128"></textarea>
+            <textarea name="text" rows="12" class="mono" placeholder="http://user:pass@host:8080&#10;socks5://host:1080&#10;host:3128"></textarea>
           </label>
           <div class="row-2">
             <label class="field"><span>Protocol when missing</span>
@@ -135,25 +120,51 @@
             </label>
           </div>
           <p class="hint">Duplicates are skipped. Credentials stay in the local database and are masked in the app.</p>
+          <p class="drawer-offer">Need proxies? <a href="{{ offer.url }}" target="_blank" rel="sponsored noopener" hx-boost="false">ProxyScrape's residential proxies</a> work well with Google Maps and start free.</p>
         </div>
-        <footer class="modal-foot"><span class="spacer"></span><button type="button" class="btn" @click="dialog = null">Cancel</button><button class="btn primary">Add proxies</button></footer>
+        <footer class="drawer-foot"><span class="spacer"></span><button type="button" class="btn" @click="dialog = null">Cancel</button><button class="btn primary">Add proxies</button></footer>
       </form>
-      <form x-show="addTab === 'file'" x-cloak hx-post="/proxies/import" hx-encoding="multipart/form-data" @htmx:after-request="if ($event.detail.successful) $el.reset()">
-        <div class="modal-body">
+      <form class="drawer-form" x-show="addTab === 'file'" x-cloak hx-post="/proxies/import" hx-encoding="multipart/form-data" @htmx:after-request="if ($event.detail.successful) { $el.reset(); dialog = null }">
+        <div class="drawer-body">
           <label class="field"><span>File <em>.txt, .csv or .list, one proxy per line</em></span><input type="file" name="file" accept=".txt,.csv,.list,text/plain" required></label>
           <label class="field"><span>Protocol when missing</span>
             <select name="protocol"><option>http</option><option>https</option><option>socks4</option><option>socks5</option><option>socks5h</option></select>
           </label>
           <p class="hint">Big files import in the background. You'll get a notice when it's done.</p>
         </div>
-        <footer class="modal-foot"><span class="spacer"></span><button type="button" class="btn" @click="dialog = null">Cancel</button><button class="btn primary">Import file</button></footer>
+        <footer class="drawer-foot"><span class="spacer"></span><button type="button" class="btn" @click="dialog = null">Cancel</button><button class="btn primary">Import file</button></footer>
       </form>
-    </div>
+    </aside>
+  </div>
+
+  <div class="drawer-root is-task" x-show="dialog === 'checker'" x-cloak>
+    <div class="drawer-scrim" @click="dialog = null"></div>
+    <aside class="drawer narrow" role="dialog" aria-labelledby="checker-title">
+      <header class="drawer-head"><h2 id="checker-title">Checker settings</h2><span class="spacer"></span><button type="button" class="icon-btn" @click="dialog = null" aria-label="Close"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></header>
+      <form hx-post="/proxies/settings" class="drawer-form" @htmx:after-request="if ($event.detail.successful) dialog = null">
+        <div class="drawer-body">
+          <p class="hint">A proxy is healthy when most attempts reach the test endpoint and find the expected text under the slow threshold. One that can't be reached on the first attempt fails at once, without retries.</p>
+          <label class="field"><span>Test endpoint</span><input name="endpoint" value="{{ checker.endpoint }}"></label>
+          <label class="field"><span>Expected body text</span><input name="expected_body" value="{{ checker.expected_body }}"></label>
+          <div class="row-2">
+            <label class="field"><span>Checks at once <em>1–2048</em></span><input type="number" min="1" max="2048" name="concurrency" value="{{ checker.concurrency }}"></label>
+            <label class="field"><span>Timeout <em>seconds</em></span><input type="number" min="1" max="120" name="timeout_secs" value="{{ checker.timeout_secs }}"></label>
+          </div>
+          <div class="row-2">
+            <label class="field"><span>Retries</span><input type="number" min="0" max="5" name="retries" value="{{ checker.retries }}"></label>
+            <label class="field"><span>Slow after <em>ms</em></span><input type="number" min="1" max="120000" name="max_latency_ms" value="{{ checker.max_latency_ms }}"></label>
+          </div>
+          <label class="check"><input type="checkbox" name="verify_exit_ip" {% if checker.verify_exit_ip %}checked{% endif %}> Record each proxy's exit IP via api.ipify.org</label>
+          <p class="hint">More checks at once finish sooner; 500–1000 works well on most connections.</p>
+        </div>
+        <footer class="drawer-foot"><span class="spacer"></span><button type="button" class="btn" @click="dialog = null">Cancel</button><button class="btn primary">Save settings</button></footer>
+      </form>
+    </aside>
   </div>
 
   <div class="modal-backdrop" x-show="dialog === 'group'" x-cloak x-transition.opacity @click.self="dialog = null">
     <form class="modal narrow" hx-post="/groups">
-      <header class="modal-head"><h2>New proxy group</h2><button type="button" class="icon-btn" @click="dialog = null" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg></button></header>
+      <header class="modal-head"><h2>New proxy group</h2><button type="button" class="icon-btn" @click="dialog = null" aria-label="Close"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></header>
       <div class="modal-body">
         <label class="field"><span>Group name</span><input name="name" required maxlength="100" placeholder="Residential US"></label>
         <p class="hint">Searches can be limited to one group. Proxies can belong to several groups.</p>
@@ -165,7 +176,7 @@
   {% if !tabs_current_id.is_empty() %}
   <div class="modal-backdrop" x-show="dialog === 'rename'" x-cloak x-transition.opacity @click.self="dialog = null">
     <form class="modal narrow" hx-post="/groups/{{ tabs_current_id }}/rename">
-      <header class="modal-head"><h2>Rename group</h2><button type="button" class="icon-btn" @click="dialog = null" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg></button></header>
+      <header class="modal-head"><h2>Rename group</h2><button type="button" class="icon-btn" @click="dialog = null" aria-label="Close"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button></header>
       <div class="modal-body"><label class="field"><span>Group name</span><input name="name" required maxlength="100" value="{{ tabs_current_name }}"></label></div>
       <footer class="modal-foot"><span class="spacer"></span><button type="button" class="btn" @click="dialog = null">Cancel</button><button class="btn primary">Rename</button></footer>
     </form>

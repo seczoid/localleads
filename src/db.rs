@@ -4,6 +4,9 @@ use crate::models::{
 use anyhow::{Context, Result};
 
 mod accounts;
+mod counts;
+pub mod trash;
+mod writer;
 pub use accounts::{Account, add_api_key_to_file};
 use chrono::{DateTime, Utc};
 use rusqlite::{
@@ -34,6 +37,8 @@ pub struct Database {
     /// Recent filter counts by query, so a busy page doesn't recount
     /// every lead on each load.
     facets: Arc<Mutex<Vec<(String, Instant, LeadFacets)>>>,
+    /// Website reads and new leads, committed in batches by one thread.
+    writes: Arc<Mutex<std::sync::mpsc::Sender<writer::Write>>>,
     path: Option<PathBuf>,
 }
 
@@ -111,10 +116,62 @@ fn push_in(
 }
 
 impl LeadQuery {
-    fn conditions(&self, skip: Option<Facet>) -> (Vec<String>, Vec<SqlValue>) {
+    /// Facets in the order `count_facets` reads their flags.
+    const NARROWING: [Facet; 7] = [
+        Facet::Category,
+        Facet::State,
+        Facet::City,
+        Facet::Phone,
+        Facet::Website,
+        Facet::Email,
+        Facet::Rating,
+    ];
+
+    /// The SQL condition one facet's current selection adds, if any.
+    /// `wide`: the chosen searches hold most of the leads. Then each lead
+    /// is checked against them as the leads come in sorted order, which
+    /// stops after one page instead of sorting the whole list.
+    fn facet_condition(&self, facet: Facet, wide: bool) -> Option<(String, Vec<SqlValue>)> {
+        let list = |template: &str, items: &[String]| {
+            (!items.is_empty()).then(|| {
+                let marks = vec!["?"; items.len()].join(", ");
+                (
+                    template.replace("{}", &marks),
+                    items.iter().map(|item| SqlValue::Text(item.clone())).collect(),
+                )
+            })
+        };
+        match facet {
+            Facet::Source => list(
+                if wide {
+                    "EXISTS (SELECT 1 FROM lead_sources s WHERE s.lead_id = leads.id AND s.job_id IN ({}))"
+                } else {
+                    "id IN (SELECT lead_id FROM lead_sources WHERE job_id IN ({}))"
+                },
+                &self.sources,
+            ),
+            Facet::Category => list("coalesce(category, '') IN ({})", &self.categories),
+            Facet::State => list("coalesce(state, '') IN ({})", &self.states),
+            Facet::City => list(&format!("{CITY_KEY} IN ({{}})"), &self.cities),
+            Facet::Phone => self
+                .has_phone
+                .then(|| ("coalesce(phone, '') <> ''".to_owned(), Vec::new())),
+            Facet::Website => match self.website {
+                WebsiteFilter::Any => None,
+                WebsiteFilter::Has => Some(("coalesce(website, '') <> ''".to_owned(), Vec::new())),
+                WebsiteFilter::Missing => Some(("coalesce(website, '') = ''".to_owned(), Vec::new())),
+            },
+            Facet::Email => email_clause(&self.email).map(|clause| (clause.to_owned(), Vec::new())),
+            Facet::Rating => self
+                .min_rating
+                .map(|rating| ("rating >= ?".to_owned(), vec![SqlValue::Real(rating)])),
+        }
+    }
+
+    /// Conditions that are not facets: the find box and a table selection.
+    fn base_conditions(&self) -> (Vec<String>, Vec<SqlValue>) {
         let mut clauses = Vec::new();
         let mut values = Vec::new();
-        let keep = |facet: Facet| skip != Some(facet);
         let search = self.search.trim().to_lowercase();
         if !search.is_empty() {
             let pattern = format!("%{search}%");
@@ -127,75 +184,58 @@ impl LeadQuery {
             }
         }
         push_in(&mut clauses, &mut values, "id IN ({})", &self.ids);
-        if keep(Facet::Source) {
-            push_in(
-                &mut clauses,
-                &mut values,
-                "id IN (SELECT lead_id FROM lead_sources WHERE job_id IN ({}))",
-                &self.sources,
-            );
-        }
-        if keep(Facet::Category) {
-            push_in(
-                &mut clauses,
-                &mut values,
-                "coalesce(category, '') IN ({})",
-                &self.categories,
-            );
-        }
-        if keep(Facet::State) {
-            push_in(
-                &mut clauses,
-                &mut values,
-                "coalesce(state, '') IN ({})",
-                &self.states,
-            );
-        }
-        if keep(Facet::City) {
-            push_in(
-                &mut clauses,
-                &mut values,
-                &format!("{CITY_KEY} IN ({{}})"),
-                &self.cities,
-            );
-        }
-        if keep(Facet::Phone) && self.has_phone {
-            clauses.push("coalesce(phone, '') <> ''".to_owned());
-        }
-        if keep(Facet::Website) {
-            match self.website {
-                WebsiteFilter::Any => {}
-                WebsiteFilter::Has => clauses.push("coalesce(website, '') <> ''".to_owned()),
-                WebsiteFilter::Missing => clauses.push("coalesce(website, '') = ''".to_owned()),
+        (clauses, values)
+    }
+
+    fn conditions_with(&self, skip: Option<Facet>, wide: bool) -> (Vec<String>, Vec<SqlValue>) {
+        let (mut clauses, mut values) = self.base_conditions();
+        for facet in std::iter::once(Facet::Source).chain(Self::NARROWING) {
+            if skip != Some(facet)
+                && let Some((clause, more)) = self.facet_condition(facet, wide)
+            {
+                clauses.push(clause);
+                values.extend(more);
             }
-        }
-        if keep(Facet::Email)
-            && let Some(clause) = email_clause(&self.email)
-        {
-            clauses.push(clause.to_owned());
-        }
-        if keep(Facet::Rating)
-            && let Some(rating) = self.min_rating
-        {
-            clauses.push("rating >= ?".to_owned());
-            values.push(SqlValue::Real(rating));
         }
         (clauses, values)
     }
 
     fn where_clause(&self) -> (String, Vec<SqlValue>) {
-        self.where_except(None, &[])
+        self.where_except(None)
     }
 
-    fn where_except(&self, skip: Option<Facet>, extra: &[&str]) -> (String, Vec<SqlValue>) {
-        let (mut clauses, values) = self.conditions(skip);
-        clauses.extend(extra.iter().map(|clause| (*clause).to_owned()));
-        let clause = if clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", clauses.join(" AND "))
-        };
-        (clause, values)
+    fn where_except(&self, skip: Option<Facet>) -> (String, Vec<SqlValue>) {
+        let (clauses, values) = self.conditions_with(skip, false);
+        join_where(&clauses, values)
+    }
+
+    fn page_where(&self, wide: bool) -> (String, Vec<SqlValue>) {
+        let (clauses, values) = self.conditions_with(None, wide);
+        join_where(&clauses, values)
+    }
+
+    /// True when the list is sorted by when leads were added, which an
+    /// index can give in order.
+    fn sorted_by_added(&self) -> bool {
+        matches!(self.sort.split(':').next().unwrap_or(""), "" | "added" | "oldest")
+    }
+
+    /// Only one search is chosen and nothing else narrows the list, so its
+    /// kept total is the answer.
+    fn single_source_only(&self) -> Option<&str> {
+        let plain = self.search.trim().is_empty()
+            && self.ids.is_empty()
+            && self.categories.is_empty()
+            && self.states.is_empty()
+            && self.cities.is_empty()
+            && !self.has_phone
+            && matches!(self.website, WebsiteFilter::Any)
+            && email_clause(&self.email).is_none()
+            && self.min_rating.is_none();
+        match self.sources.as_slice() {
+            [source] if plain => Some(source),
+            _ => None,
+        }
     }
 
     /// `sort` is "key" or "key:asc|desc". Empty values sort last either way,
@@ -237,6 +277,46 @@ impl LeadQuery {
         };
         format!("ORDER BY {order}, id")
     }
+}
+
+/// The most common values first, ties in name order.
+fn top_counts(counts: HashMap<String, i64>, limit: usize) -> Vec<FacetCount> {
+    let mut list: Vec<FacetCount> = counts
+        .into_iter()
+        .map(|(value, count)| FacetCount { value, count })
+        .collect();
+    list.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+    list.truncate(limit);
+    list
+}
+
+/// What a delete removed, and the trash entry that can bring it back.
+#[derive(Debug, Clone)]
+pub struct Removed {
+    pub count: usize,
+    pub undo: String,
+}
+
+/// Fills `temp.doomed` with the ids a delete is about to remove, so each
+/// statement can match them all at once.
+fn mark_doomed(connection: &Connection, ids: &[String]) -> Result<()> {
+    connection.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS doomed (id TEXT PRIMARY KEY); DELETE FROM temp.doomed;",
+    )?;
+    let mut insert = connection.prepare_cached("INSERT OR IGNORE INTO temp.doomed (id) VALUES (?)")?;
+    for id in ids {
+        insert.execute(params![id])?;
+    }
+    Ok(())
+}
+
+fn join_where(clauses: &[String], values: Vec<SqlValue>) -> (String, Vec<SqlValue>) {
+    let clause = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", clauses.join(" AND "))
+    };
+    (clause, values)
 }
 
 fn email_clause(value: &str) -> Option<&'static str> {
@@ -295,6 +375,14 @@ pub struct LeadSource {
     pub query: Option<String>,
     pub location: Option<String>,
     pub found_at: String,
+}
+
+/// Website-reading progress of one search's leads.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EnrichCounts {
+    pub leads: i64,
+    pub read: i64,
+    pub with_email: i64,
 }
 
 /// A lead waiting for enrichment, with what the enrichment needs.
@@ -455,15 +543,18 @@ impl Database {
             .with_context(|| format!("open SQLite database at {}", path.display()))?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch(
-            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA cache_size = -65536;
-             PRAGMA journal_size_limit = 67108864;",
+            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA cache_size = -131072;
+             PRAGMA journal_size_limit = 67108864; PRAGMA temp_store = MEMORY;
+             PRAGMA mmap_size = 1073741824;",
         )?;
         // Fold the write-ahead log into the database and shrink it. A big
         // write (a backfill, a bulk delete) can leave it gigabytes long,
         // and without a size limit SQLite never gives the space back.
         connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        let connection = Arc::new(Mutex::new(connection));
         let mut database = Self {
-            connection: Arc::new(Mutex::new(connection)),
+            writes: Arc::new(Mutex::new(writer::start(connection.clone()))),
+            connection,
             readers: Arc::new(Vec::new()),
             next_reader: Arc::new(AtomicUsize::new(0)),
             facets: Arc::new(Mutex::new(Vec::new())),
@@ -479,8 +570,10 @@ impl Database {
 
     #[cfg(test)]
     pub fn in_memory() -> Result<Self> {
+        let connection = Arc::new(Mutex::new(Connection::open_in_memory()?));
         let database = Self {
-            connection: Arc::new(Mutex::new(Connection::open_in_memory()?)),
+            writes: Arc::new(Mutex::new(writer::start(connection.clone()))),
+            connection,
             readers: Arc::new(Vec::new()),
             next_reader: Arc::new(AtomicUsize::new(0)),
             facets: Arc::new(Mutex::new(Vec::new())),
@@ -638,17 +731,122 @@ impl Database {
             CREATE INDEX IF NOT EXISTS leads_list_idx ON leads(id, job_id, category, (coalesce(phone, '') <> ''), (coalesce(website, '') <> ''));
             -- Leads claimed by a run the app didn't finish go back in the queue.
             UPDATE leads SET enrich_status = NULL WHERE enrich_status = 'queued';
+            -- Areas a search has finished, so it can carry on after a crash
+            -- or restart without searching them again.
+            CREATE TABLE IF NOT EXISTS job_lookups (
+                job_id VARCHAR NOT NULL,
+                lookup_key VARCHAR NOT NULL,
+                PRIMARY KEY (job_id, lookup_key)
+            ) WITHOUT ROWID;
             "#,
         )?;
+        // The process running a search, so a restart can tell a search
+        // whose app died from one another process is still running.
+        ensure_column(&connection, "jobs", "runner_pid", "INTEGER")?;
         accounts::create_tables(&connection)?;
         backfill_leads(&connection)?;
         shrink_leads(&connection)?;
+        counts::ensure(&connection)?;
+        trash::ensure(&connection)?;
         connection.execute("UPDATE schema_version SET version = 3 WHERE version < 3", [])?;
+        Ok(())
+    }
+
+    /// Searches left active by an app that is no longer running: each with
+    /// whether it was paused. Searches that were stopping are marked
+    /// stopped instead.
+    pub fn orphaned_jobs(
+        &self,
+        running_here: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<(String, SearchConfig, bool)>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, status, config_json, runner_pid FROM jobs
+             WHERE status IN ('queued', 'running', 'paused', 'stopping') ORDER BY created_at",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        let mut jobs = Vec::new();
+        for (id, status, config_json, pid) in rows {
+            if running_here(&id) || pid.is_some_and(process_alive) {
+                continue;
+            }
+            if status == "stopping" {
+                connection.execute(
+                    "UPDATE jobs SET status = 'cancelled', finished_at = ?, error = 'Stopped by user' WHERE id = ?",
+                    params![now(), id],
+                )?;
+                continue;
+            }
+            match serde_json::from_str::<SearchConfig>(&config_json) {
+                Ok(config) => jobs.push((id, config, status == "paused")),
+                Err(error) => {
+                    connection.execute(
+                        "UPDATE jobs SET status = 'interrupted', finished_at = ?, error = ? WHERE id = ?",
+                        params![now(), format!("Couldn't read the search's settings: {error}"), id],
+                    )?;
+                }
+            }
+        }
+        Ok(jobs)
+    }
+
+    /// Marks this process as the one running `job_id`.
+    pub fn claim_job_runner(&self, job_id: &str) -> Result<()> {
+        let connection = self.lock()?;
         connection.execute(
-            "UPDATE jobs SET status = 'interrupted', finished_at = ?, error = 'Application exited while job was active' WHERE status IN ('running', 'paused', 'stopping')",
-            params![now()],
+            "UPDATE jobs SET runner_pid = ?, finished_at = NULL, error = NULL WHERE id = ?",
+            params![i64::from(std::process::id()), job_id],
         )?;
         Ok(())
+    }
+
+    /// The areas `job_id` already finished.
+    pub fn done_lookups(&self, job_id: &str) -> Result<std::collections::HashSet<String>> {
+        let connection = self.read()?;
+        let mut statement =
+            connection.prepare("SELECT lookup_key FROM job_lookups WHERE job_id = ?")?;
+        let keys = statement
+            .query_map(params![job_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(keys)
+    }
+
+    pub fn mark_lookups_done(&self, job_id: &str, keys: &[String]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let connection = self.lock()?;
+        let transaction = connection.unchecked_transaction()?;
+        {
+            let mut statement = transaction.prepare(
+                "INSERT OR IGNORE INTO job_lookups (job_id, lookup_key) VALUES (?, ?)",
+            )?;
+            for key in keys {
+                statement.execute(params![job_id, key])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Leads in `job_id`'s list.
+    pub fn job_lead_count(&self, job_id: &str) -> Result<i64> {
+        let connection = self.read()?;
+        Ok(connection.query_row(
+            "SELECT count(*) FROM lead_sources WHERE job_id = ?",
+            params![job_id],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn create_job(&self, id: &str, config: &SearchConfig) -> Result<()> {
@@ -733,8 +931,9 @@ impl Database {
             .ok_or_else(|| anyhow::anyhow!("lead insert returned no result"))
     }
 
-    /// `insert_lead` for a page of results in one transaction, which keeps
-    /// the single database connection free for other work during big searches.
+    /// `insert_lead` for a page of results. Pages that arrive together are
+    /// committed together by the writer thread.
+    #[cfg(test)]
     pub fn insert_leads(
         &self,
         job_id: &str,
@@ -742,32 +941,93 @@ impl Database {
         location: &str,
         records: &[BusinessRecord],
     ) -> Result<Vec<LeadInsert>> {
-        let connection = self.lock()?;
-        let transaction = connection.unchecked_transaction()?;
-        let found_at = now();
-        let mut results = Vec::with_capacity(records.len());
-        for record in records {
-            results.push(insert_lead_row(
-                &transaction,
-                job_id,
-                query,
-                location,
-                record,
-                &found_at,
-            )?);
-        }
-        transaction.commit()?;
-        Ok(results)
+        let (done, wait) = std::sync::mpsc::channel();
+        self.queue_leads(job_id, query, location, records, Box::new(move |result| {
+            let _ = done.send(result);
+        }))?;
+        wait.recv().context("database writer stopped")?
+    }
+
+    /// `insert_leads` for async code: waits without holding a thread.
+    pub async fn insert_leads_async(
+        &self,
+        job_id: &str,
+        query: &str,
+        location: &str,
+        records: &[BusinessRecord],
+    ) -> Result<Vec<LeadInsert>> {
+        let (done, wait) = tokio::sync::oneshot::channel();
+        self.queue_leads(job_id, query, location, records, Box::new(move |result| {
+            let _ = done.send(result);
+        }))?;
+        wait.await.context("database writer stopped")?
+    }
+
+    fn queue_leads(
+        &self,
+        job_id: &str,
+        query: &str,
+        location: &str,
+        records: &[BusinessRecord],
+        done: Box<dyn FnOnce(Result<Vec<LeadInsert>>) + Send>,
+    ) -> Result<()> {
+        self.queue(writer::Write::Leads {
+            job_id: job_id.to_owned(),
+            query: query.to_owned(),
+            location: location.to_owned(),
+            records: records.to_vec(),
+            done,
+        })
+    }
+
+    fn queue(&self, write: writer::Write) -> Result<()> {
+        self.writes
+            .lock()
+            .map_err(|_| anyhow::anyhow!("database writer lock poisoned"))?
+            .send(write)
+            .map_err(|_| anyhow::anyhow!("database writer stopped"))
     }
 
     /// Takes up to `limit` leads of `job_id` that were never enriched and
     /// marks them queued so no other worker picks them up.
-    pub fn claim_enrich_targets(&self, job_id: &str, limit: usize) -> Result<Vec<EnrichTarget>> {
+    /// How many of a search's leads exist, have been read (website and
+    /// place page), and have at least one email.
+    pub fn job_enrich_counts(&self, job_id: &str) -> Result<EnrichCounts> {
+        let connection = self.read()?;
+        let counts = connection
+            .query_row(
+                "SELECT leads, read, with_email FROM job_counts WHERE job_id = ?1",
+                params![job_id],
+                |row| {
+                    Ok(EnrichCounts {
+                        leads: row.get(0)?,
+                        read: row.get(1)?,
+                        with_email: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or(EnrichCounts {
+                leads: 0,
+                read: 0,
+                with_email: 0,
+            });
+        Ok(counts)
+    }
+
+    /// `after` is the last lead id an earlier claim returned (empty to
+    /// start), so a walk through a long list never reads a row twice.
+    pub fn claim_enrich_targets(
+        &self,
+        job_id: &str,
+        after: &str,
+        limit: usize,
+    ) -> Result<Vec<EnrichTarget>> {
         self.claim_targets(
             "SELECT l.id FROM lead_sources s JOIN leads l ON l.id = s.lead_id
-             WHERE s.job_id = ?1 AND l.enrich_status IS NULL
-             ORDER BY s.found_at, l.id LIMIT ?2",
-            params![job_id, i64::try_from(limit).unwrap_or(i64::MAX)],
+             WHERE s.job_id = ?1 AND s.lead_id > ?2 AND l.enrich_status IS NULL
+             ORDER BY s.lead_id LIMIT ?3",
+            params![job_id, after, i64::try_from(limit).unwrap_or(i64::MAX)],
         )
     }
 
@@ -848,50 +1108,43 @@ impl Database {
 
     /// Stores an enrichment: `patch` is merged into the lead's extra fields
     /// (keys set to null are removed) and the summary fills the columns.
+    /// Saves that arrive together are committed together.
+    #[cfg(test)]
     pub fn save_enrichment(
         &self,
         id: &str,
         patch: &serde_json::Map<String, serde_json::Value>,
         summary: &EnrichSummary,
     ) -> Result<()> {
-        let connection = self.lock()?;
-        let transaction = connection.unchecked_transaction()?;
-        let extra: Option<String> = transaction
-            .query_row("SELECT extra_json FROM leads WHERE id = ?", params![id], |row| row.get(0))
-            .optional()?;
-        let Some(extra) = extra else {
-            return Ok(());
-        };
-        let mut extra: serde_json::Value =
-            serde_json::from_str(&extra).unwrap_or_else(|_| serde_json::json!({}));
-        if !extra.is_object() {
-            extra = serde_json::json!({});
-        }
-        if let Some(object) = extra.as_object_mut() {
-            for (key, value) in patch {
-                if value.is_null() {
-                    object.remove(key);
-                } else {
-                    object.insert(key.clone(), value.clone());
-                }
-            }
-        }
-        transaction.execute(
-            r#"UPDATE leads SET extra_json = ?, email = ?, email_status = ?, email_reach = ?,
-                   email_count = ?, enrich_status = ?, enriched_at = ? WHERE id = ?"#,
-            params![
-                serde_json::to_string(&extra)?,
-                summary.email,
-                summary.email_status,
-                summary.email_reach,
-                summary.email_count,
-                summary.status,
-                now(),
-                id,
-            ],
-        )?;
-        transaction.commit()?;
-        Ok(())
+        let (done, wait) = std::sync::mpsc::channel();
+        self.queue(writer::Write::Enrichment {
+            id: id.to_owned(),
+            patch: patch.clone(),
+            summary: summary.clone(),
+            done: Box::new(move |result| {
+                let _ = done.send(result);
+            }),
+        })?;
+        wait.recv().context("database writer stopped")?
+    }
+
+    /// `save_enrichment` for async code: waits without holding a thread.
+    pub async fn save_enrichment_async(
+        &self,
+        id: String,
+        patch: serde_json::Map<String, serde_json::Value>,
+        summary: EnrichSummary,
+    ) -> Result<()> {
+        let (done, wait) = tokio::sync::oneshot::channel();
+        self.queue(writer::Write::Enrichment {
+            id,
+            patch,
+            summary,
+            done: Box::new(move |result| {
+                let _ = done.send(result);
+            }),
+        })?;
+        wait.await.context("database writer stopped")?
     }
 
     /// Per-search list totals, keyed by job id.
@@ -900,13 +1153,7 @@ impl Database {
         let mut stats: HashMap<String, LeadListStats> = HashMap::new();
         {
             let mut statement = connection.prepare(
-                r#"SELECT s.job_id, count(*),
-                          sum(l.job_id = s.job_id),
-                          sum(coalesce(l.phone, '') <> ''),
-                          sum(coalesce(l.website, '') <> ''),
-                          max(s.found_at)
-                   FROM lead_sources s JOIN leads l INDEXED BY leads_list_idx ON l.id = s.lead_id
-                   GROUP BY s.job_id"#,
+                "SELECT job_id, leads, own, with_phone, with_website, last_found FROM job_counts WHERE leads > 0",
             )?;
             let rows = statement.query_map([], |row| {
                 Ok((
@@ -927,9 +1174,7 @@ impl Database {
             }
         }
         let mut statement = connection.prepare(
-            r#"SELECT s.job_id, coalesce(nullif(l.category, ''), 'Uncategorized'), count(*) AS n
-               FROM lead_sources s JOIN leads l INDEXED BY leads_list_idx ON l.id = s.lead_id
-               GROUP BY 1, 2 ORDER BY 1, n DESC"#,
+            "SELECT job_id, category, n FROM job_categories WHERE n > 0 ORDER BY job_id, n DESC, category",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
@@ -987,107 +1232,198 @@ impl Database {
     }
 
     fn count_facets(&self, query: &LeadQuery) -> Result<LeadFacets> {
-        let connection = self.read()?;
-        let count_rows = |sql: String, values: Vec<SqlValue>| -> Result<Vec<FacetCount>> {
-            let mut statement = connection.prepare(&sql)?;
-            let rows = statement.query_map(params_from_iter(values), |row| {
-                Ok(FacetCount {
-                    value: row.get(0)?,
-                    count: row.get(1)?,
-                })
-            })?;
-            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-        };
-        let mut facets = LeadFacets::default();
+        let (narrowed, _) = query.base_conditions();
+        if narrowed.is_empty() && query.sources.is_empty() {
+            self.count_facets_each(query)
+        } else {
+            self.count_facets_one_pass(query)
+        }
+    }
 
+    /// Leads per search, with every other selection applied.
+    fn count_sources(&self, connection: &Connection, query: &LeadQuery) -> Result<Vec<FacetCount>> {
+        let (clause, values) = query.where_except(Some(Facet::Source));
+        let sql = if clause.trim().is_empty() {
+            "SELECT job_id, count(*) FROM lead_sources GROUP BY job_id".to_owned()
+        } else {
+            format!(
+                "SELECT job_id, count(*) FROM lead_sources WHERE lead_id IN (SELECT id FROM leads {clause}) GROUP BY job_id"
+            )
+        };
+        let mut statement = connection.prepare(&sql)?;
+        let rows = statement.query_map(params_from_iter(values), |row| {
+            Ok(FacetCount { value: row.get(0)?, count: row.get(1)? })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// One query per facet, each with every other selection applied. Over
+    /// all leads these are answered from indexes, which beats reading rows.
+    fn count_facets_each(&self, query: &LeadQuery) -> Result<LeadFacets> {
+        let connection = self.read()?;
+        let scalar = |skip: Facet, select: &str| -> Result<Vec<i64>> {
+            let (clause, values) = query.where_except(Some(skip));
+            Ok(connection.query_row(
+                &format!("SELECT {select} FROM leads {clause}"),
+                params_from_iter(values),
+                |row| (0..row.as_ref().column_count()).map(|i| row.get(i)).collect(),
+            )?)
+        };
+        let grouped = |skip: Facet, key: &str, extra: &str, limit: usize| -> Result<Vec<FacetCount>> {
+            let (clause, values) = query.where_except(Some(skip));
+            let glue = if clause.is_empty() { "WHERE" } else { " AND" };
+            let extra = if extra.is_empty() { String::new() } else { format!("{glue} {extra}") };
+            let mut statement = connection.prepare(&format!(
+                "SELECT {key} AS v, count(*) AS n FROM leads {clause}{extra} GROUP BY v ORDER BY n DESC, v LIMIT {limit}"
+            ))?;
+            let rows = statement.query_map(params_from_iter(values), |row| {
+                Ok(FacetCount { value: row.get(0)?, count: row.get(1)? })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        };
         let (clause, values) = query.where_clause();
-        facets.total = connection.query_row(
+        let total = connection.query_row(
             &format!("SELECT count(*) FROM leads {clause}"),
             params_from_iter(values),
             |row| row.get(0),
         )?;
+        let phone = scalar(Facet::Phone, "count(*), coalesce(sum(coalesce(phone, '') <> ''), 0)")?;
+        let website = scalar(Facet::Website, "count(*), coalesce(sum(coalesce(website, '') <> ''), 0)")?;
+        let email = scalar(
+            Facet::Email,
+            "count(*), coalesce(sum(email_count > 0), 0), coalesce(sum(email_count > 0 AND email_reach = 'safe'), 0),
+             coalesce(sum(email_count = 0 AND enrich_status IN ('done', 'failed')), 0),
+             coalesce(sum(enrich_status IS NULL OR enrich_status = 'queued'), 0)",
+        )?;
+        let rating = scalar(
+            Facet::Rating,
+            "count(*), coalesce(sum(rating >= 3), 0), coalesce(sum(rating >= 4), 0), coalesce(sum(rating >= 4.5), 0)",
+        )?;
+        Ok(LeadFacets {
+            total,
+            sources: self.count_sources(&connection, query)?,
+            categories: grouped(Facet::Category, "coalesce(category, '')", "", 300)?,
+            states: grouped(Facet::State, "coalesce(state, '')", "", 100)?,
+            cities: grouped(Facet::City, CITY_KEY, "coalesce(city, '') <> ''", 300)?,
+            phone_total: phone[0],
+            with_phone: phone[1],
+            website_total: website[0],
+            with_website: website[1],
+            email: [email[0], email[1], email[2], email[3], email[4]],
+            rating_total: rating[0],
+            rating_3: rating[1],
+            rating_4: rating[2],
+            rating_45: rating[3],
+        })
+    }
 
-        let (clause, values) = query.where_except(Some(Facet::Source), &[]);
-        facets.sources = if clause.trim().is_empty() {
-            count_rows("SELECT job_id, count(*) FROM lead_sources GROUP BY job_id".to_owned(), values)?
-        } else {
-            count_rows(
-                format!(
-                    "SELECT job_id, count(*) FROM lead_sources WHERE lead_id IN (SELECT id FROM leads {clause}) GROUP BY job_id"
-                ),
-                values,
-            )?
+    /// Every facet but the searches in one pass over the matching leads,
+    /// for lists narrowed to some leads, where per-facet queries would each
+    /// look up every one of those rows again.
+    fn count_facets_one_pass(&self, query: &LeadQuery) -> Result<LeadFacets> {
+        let connection = self.read()?;
+        let mut facets = LeadFacets {
+            sources: self.count_sources(&connection, query)?,
+            ..LeadFacets::default()
         };
 
-        let (clause, values) = query.where_except(Some(Facet::Category), &[]);
-        facets.categories = count_rows(
-            format!(
-                "SELECT coalesce(category, '') AS v, count(*) AS n FROM leads {clause} GROUP BY v ORDER BY n DESC, v LIMIT 300"
-            ),
-            values,
-        )?;
+        // Every other facet in one pass. Each row says which facet
+        // selections it meets; a facet counts the rows that meet all the
+        // others, so picking a category still shows the other categories.
+        let mut columns = vec![
+            "coalesce(category, '')".to_owned(),
+            "coalesce(state, '')".to_owned(),
+            "coalesce(city, '') <> ''".to_owned(),
+            CITY_KEY.to_owned(),
+            "coalesce(phone, '') <> ''".to_owned(),
+            "coalesce(website, '') <> ''".to_owned(),
+            "coalesce(email_count > 0, 0)".to_owned(),
+            "coalesce(email_count > 0 AND email_reach = 'safe', 0)".to_owned(),
+            "coalesce(email_count = 0 AND enrich_status IN ('done', 'failed'), 0)".to_owned(),
+            "(enrich_status IS NULL OR enrich_status = 'queued')".to_owned(),
+            "coalesce(rating >= 3, 0)".to_owned(),
+            "coalesce(rating >= 4, 0)".to_owned(),
+            "coalesce(rating >= 4.5, 0)".to_owned(),
+        ];
+        const FLAGS_AT: usize = 13;
+        let mut values = Vec::new();
+        let mut selected = [false; LeadQuery::NARROWING.len()];
+        for (index, facet) in LeadQuery::NARROWING.into_iter().enumerate() {
+            match query.facet_condition(facet, false) {
+                Some((clause, more)) => {
+                    selected[index] = true;
+                    columns.push(format!("coalesce({clause}, 0)"));
+                    values.extend(more);
+                }
+                None => columns.push("1".to_owned()),
+            }
+        }
+        let (mut clauses, base_values) = query.base_conditions();
+        if let Some((clause, more)) = query.facet_condition(Facet::Source, false) {
+            clauses.push(clause);
+            values.extend(base_values);
+            values.extend(more);
+        } else {
+            values.extend(base_values);
+        }
+        let (clause, _) = join_where(&clauses, Vec::new());
+        let sql = format!("SELECT {} FROM leads {clause}", columns.join(", "));
 
-        let (clause, values) = query.where_except(Some(Facet::State), &[]);
-        facets.states = count_rows(
-            format!(
-                "SELECT coalesce(state, '') AS v, count(*) AS n FROM leads {clause} GROUP BY v ORDER BY n DESC, v LIMIT 100"
-            ),
-            values,
-        )?;
-
-        let (clause, values) = query.where_except(Some(Facet::City), &["coalesce(city, '') <> ''"]);
-        facets.cities = count_rows(
-            format!(
-                "SELECT {CITY_KEY} AS v, count(*) AS n FROM leads {clause} GROUP BY v ORDER BY n DESC, v LIMIT 300"
-            ),
-            values,
-        )?;
-
-        let (clause, values) = query.where_except(Some(Facet::Phone), &[]);
-        (facets.phone_total, facets.with_phone) = connection.query_row(
-            &format!(
-                "SELECT count(*), coalesce(sum(coalesce(phone, '') <> ''), 0) FROM leads {clause}"
-            ),
-            params_from_iter(values),
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-
-        let (clause, values) = query.where_except(Some(Facet::Website), &[]);
-        (facets.website_total, facets.with_website) = connection.query_row(
-            &format!(
-                "SELECT count(*), coalesce(sum(coalesce(website, '') <> ''), 0) FROM leads {clause}"
-            ),
-            params_from_iter(values),
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-
-        let (clause, values) = query.where_except(Some(Facet::Email), &[]);
-        facets.email = connection.query_row(
-            &format!(
-                "SELECT count(*),
-                        coalesce(sum(email_count > 0), 0),
-                        coalesce(sum(email_count > 0 AND email_reach = 'safe'), 0),
-                        coalesce(sum(email_count = 0 AND enrich_status IN ('done', 'failed')), 0),
-                        coalesce(sum(enrich_status IS NULL OR enrich_status = 'queued'), 0)
-                 FROM leads {clause}"
-            ),
-            params_from_iter(values),
-            |row| Ok([row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?]),
-        )?;
-
-        let (clause, values) = query.where_except(Some(Facet::Rating), &[]);
-        (
-            facets.rating_total,
-            facets.rating_3,
-            facets.rating_4,
-            facets.rating_45,
-        ) = connection.query_row(
-            &format!(
-                "SELECT count(*), coalesce(sum(rating >= 3), 0), coalesce(sum(rating >= 4), 0), coalesce(sum(rating >= 4.5), 0) FROM leads {clause}"
-            ),
-            params_from_iter(values),
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )?;
+        let mut categories: HashMap<String, i64> = HashMap::new();
+        let mut states: HashMap<String, i64> = HashMap::new();
+        let mut cities: HashMap<String, i64> = HashMap::new();
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = statement.query(params_from_iter(values))?;
+        while let Some(row) = rows.next()? {
+            let mut meets = [true; LeadQuery::NARROWING.len()];
+            for (index, flag) in meets.iter_mut().enumerate() {
+                if selected[index] {
+                    *flag = row.get::<_, i64>(FLAGS_AT + index)? != 0;
+                }
+            }
+            let misses = meets.iter().filter(|meet| !**meet).count();
+            if misses > 1 {
+                continue;
+            }
+            // Whether the row counts toward the facet at `index`: it meets
+            // every selection, or misses only that facet's own.
+            let counts_for = |index: usize| misses == 0 || !meets[index];
+            if misses == 0 {
+                facets.total += 1;
+            }
+            if counts_for(0) {
+                *categories.entry(row.get(0)?).or_default() += 1;
+            }
+            if counts_for(1) {
+                *states.entry(row.get(1)?).or_default() += 1;
+            }
+            if counts_for(2) && row.get::<_, bool>(2)? {
+                *cities.entry(row.get(3)?).or_default() += 1;
+            }
+            if counts_for(3) {
+                facets.phone_total += 1;
+                facets.with_phone += i64::from(row.get::<_, bool>(4)?);
+            }
+            if counts_for(4) {
+                facets.website_total += 1;
+                facets.with_website += i64::from(row.get::<_, bool>(5)?);
+            }
+            if counts_for(5) {
+                facets.email[0] += 1;
+                for (slot, column) in (1..5).zip(6..10) {
+                    facets.email[slot] += i64::from(row.get::<_, bool>(column)?);
+                }
+            }
+            if counts_for(6) {
+                facets.rating_total += 1;
+                facets.rating_3 += i64::from(row.get::<_, bool>(10)?);
+                facets.rating_4 += i64::from(row.get::<_, bool>(11)?);
+                facets.rating_45 += i64::from(row.get::<_, bool>(12)?);
+            }
+        }
+        facets.categories = top_counts(categories, 300);
+        facets.states = top_counts(states, 100);
+        facets.cities = top_counts(cities, 300);
         Ok(facets)
     }
 
@@ -1182,14 +1518,20 @@ impl Database {
         Ok(())
     }
 
-    pub fn delete_proxy_group(&self, id: &str) -> Result<()> {
+    pub fn delete_proxy_group(&self, id: &str) -> Result<Removed> {
         let connection = self.lock()?;
-        connection.execute(
-            "DELETE FROM proxy_group_members WHERE group_id = ?",
-            params![id],
-        )?;
-        connection.execute("DELETE FROM proxy_groups WHERE id = ?", params![id])?;
-        Ok(())
+        let transaction = connection.unchecked_transaction()?;
+        let label: String = transaction
+            .query_row("SELECT name FROM proxy_groups WHERE id = ?", params![id], |row| row.get(0))
+            .optional()?
+            .unwrap_or_else(|| "proxy group".into());
+        let undo = trash::open(&transaction, "proxy_group", &format!("group {label}"))?;
+        trash::keep(&transaction, &undo, "proxy_group_members", "group_id = ?", &[&id])?;
+        let count = trash::keep(&transaction, &undo, "proxy_groups", "id = ?", &[&id])?;
+        transaction.execute("DELETE FROM proxy_group_members WHERE group_id = ?", params![id])?;
+        transaction.execute("DELETE FROM proxy_groups WHERE id = ?", params![id])?;
+        transaction.commit()?;
+        Ok(Removed { count, undo })
     }
 
     pub fn add_proxies_to_group(&self, group_id: &str, proxy_ids: &[String]) -> Result<()> {
@@ -1251,26 +1593,22 @@ impl Database {
         Ok(())
     }
 
-    pub fn delete_proxies(&self, ids: &[String]) -> Result<()> {
-        if ids.is_empty() {
-            return Ok(());
-        }
+    pub fn delete_proxies(&self, ids: &[String]) -> Result<Removed> {
         let connection = self.lock()?;
         let transaction = connection.unchecked_transaction()?;
-        let mut members =
-            transaction.prepare("DELETE FROM proxy_group_members WHERE proxy_id = ?")?;
-        let mut history = transaction.prepare("DELETE FROM proxy_checks WHERE proxy_id = ?")?;
-        let mut proxies = transaction.prepare("DELETE FROM proxies WHERE id = ?")?;
-        for id in ids {
-            members.execute(params![id])?;
-            history.execute(params![id])?;
-            proxies.execute(params![id])?;
-        }
-        drop(proxies);
-        drop(history);
-        drop(members);
+        mark_doomed(&transaction, ids)?;
+        let label = if ids.len() == 1 { "1 proxy".to_string() } else { format!("{} proxies", ids.len()) };
+        let undo = trash::open(&transaction, "proxies", &label)?;
+        let doomed = "IN (SELECT id FROM temp.doomed)";
+        trash::keep(&transaction, &undo, "proxy_group_members", &format!("proxy_id {doomed}"), &[])?;
+        trash::keep(&transaction, &undo, "proxy_checks", &format!("proxy_id {doomed}"), &[])?;
+        let count = trash::keep(&transaction, &undo, "proxies", &format!("id {doomed}"), &[])?;
+        transaction.execute(&format!("DELETE FROM proxy_group_members WHERE proxy_id {doomed}"), [])?;
+        transaction.execute(&format!("DELETE FROM proxy_checks WHERE proxy_id {doomed}"), [])?;
+        transaction.execute(&format!("DELETE FROM proxies WHERE id {doomed}"), [])?;
+        transaction.execute("DELETE FROM temp.doomed", [])?;
         transaction.commit()?;
-        Ok(())
+        Ok(Removed { count, undo })
     }
 
     /// Stores a batch of check results in one transaction: each proxy's
@@ -1360,25 +1698,74 @@ impl Database {
         Ok(self.list_jobs()?.into_iter().find(|job| job.id == id))
     }
 
-    pub fn delete_job(&self, id: &str, delete_leads: bool) -> Result<usize> {
+    /// Deletes a search, keeping its rows in the trash for a while. The
+    /// count is the leads removed with it.
+    pub fn delete_job(&self, id: &str, delete_leads: bool) -> Result<Removed> {
         let connection = self.lock()?;
         let transaction = connection.unchecked_transaction()?;
+        let label: String = transaction
+            .query_row("SELECT 'search \"' || name || '\"' FROM jobs WHERE id = ?", params![id], |row| row.get(0))
+            .optional()?
+            .unwrap_or_else(|| "search".into());
+        let undo = trash::open(&transaction, "search", &label)?;
         // Leads another search also found stay; they only leave this list.
-        let removed_leads = if delete_leads {
-            transaction.execute(
-                r#"DELETE FROM leads
-                   WHERE id IN (SELECT lead_id FROM lead_sources WHERE job_id = ?1)
-                   AND NOT EXISTS (SELECT 1 FROM lead_sources s WHERE s.lead_id = leads.id AND s.job_id <> ?1)"#,
-                params![id],
-            )?
+        let exclusive = r#"id IN (SELECT lead_id FROM lead_sources WHERE job_id = ?1)
+                   AND NOT EXISTS (SELECT 1 FROM lead_sources s WHERE s.lead_id = leads.id AND s.job_id <> ?1)"#;
+        let count = if delete_leads {
+            trash::keep(&transaction, &undo, "leads", exclusive, &[&id])?;
+            transaction.execute(&format!("DELETE FROM leads WHERE {exclusive}"), params![id])?
         } else {
             0
         };
+        for table in ["lead_sources", "job_events", "job_lookups", "jobs"] {
+            let column = if table == "jobs" { "id" } else { "job_id" };
+            trash::keep(&transaction, &undo, table, &format!("{column} = ?"), &[&id])?;
+        }
         transaction.execute("DELETE FROM lead_sources WHERE job_id = ?", params![id])?;
         transaction.execute("DELETE FROM job_events WHERE job_id = ?", params![id])?;
+        transaction.execute("DELETE FROM job_lookups WHERE job_id = ?", params![id])?;
+        counts::forget(&transaction, id)?;
         transaction.execute("DELETE FROM jobs WHERE id = ?", params![id])?;
         transaction.commit()?;
-        Ok(removed_leads)
+        Ok(Removed { count, undo })
+    }
+
+    /// Puts back what a delete removed, if it is still in the trash.
+    pub fn restore(&self, trash_id: &str) -> Result<Option<trash::Restored>> {
+        let connection = self.lock()?;
+        let transaction = connection.unchecked_transaction()?;
+        let restored = trash::restore(&transaction, trash_id)?;
+        transaction.commit()?;
+        Ok(restored)
+    }
+
+    /// How many events a search has logged.
+    pub fn job_event_count(&self, job_id: &str) -> Result<i64> {
+        let connection = self.read()?;
+        Ok(connection.query_row(
+            "SELECT count(*) FROM job_events WHERE job_id = ?",
+            params![job_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Every event of a search, oldest first, matching an optional level
+    /// and text (case-insensitive), for the log download.
+    pub fn job_events_matching(&self, job_id: &str, level: &str, text: &str) -> Result<Vec<JobEvent>> {
+        let connection = self.read()?;
+        let pattern = format!("%{}%", text.trim().to_lowercase());
+        let mut statement = connection.prepare(
+            "SELECT created_at, level, message FROM job_events
+             WHERE job_id = ?1 AND (?2 = '' OR level = ?2) AND lower(message) LIKE ?3 ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![job_id, level, pattern], |row| {
+            Ok(JobEvent {
+                created_at: row.get(0)?,
+                level: row.get(1)?,
+                message: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn job_event_rows(&self, job_id: &str, limit: usize) -> Result<Vec<JobEvent>> {
@@ -1398,7 +1785,8 @@ impl Database {
 
     pub fn query_leads(&self, query: &LeadQuery) -> Result<Vec<LeadRow>> {
         let connection = self.read()?;
-        let (clause, mut values) = query.where_clause();
+        let wide = query.sorted_by_added() && sources_are_wide(&connection, &query.sources)?;
+        let (clause, mut values) = query.page_where(wide);
         values.push(SqlValue::Integer(i64::try_from(query.limit.max(1))?));
         values.push(SqlValue::Integer(i64::try_from(query.offset)?));
         let sql = format!(
@@ -1421,6 +1809,14 @@ impl Database {
 
     pub fn count_leads(&self, query: &LeadQuery) -> Result<i64> {
         let connection = self.read()?;
+        if let Some(source) = query.single_source_only() {
+            return Ok(connection
+                .query_row("SELECT leads FROM job_counts WHERE job_id = ?1", [source], |row| {
+                    row.get(0)
+                })
+                .optional()?
+                .unwrap_or(0));
+        }
         let (clause, values) = query.where_clause();
         let sql = format!("SELECT count(*) FROM leads {clause}");
         Ok(connection.query_row(&sql, params_from_iter(values), |row| row.get(0))?)
@@ -1436,6 +1832,32 @@ impl Database {
         let mut statement = connection.prepare(&sql)?;
         let rows = statement.query_map(params_from_iter(values), record_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Walks the export rows one at a time, so a large list never sits in
+    /// memory and the first rows can go out before the last are read.
+    /// `each` returns false to stop early.
+    pub fn for_each_export_lead(
+        &self,
+        query: &LeadQuery,
+        mut each: impl FnMut(BusinessRecord) -> Result<bool>,
+    ) -> Result<usize> {
+        let connection = self.read()?;
+        let (clause, values) = query.where_clause();
+        let sql = format!(
+            "SELECT name, category, address, phone, website, latitude, longitude, rating, review_count, status, hours, maps_url, place_id, source, extra_json FROM leads {clause} {}",
+            query.order_clause()
+        );
+        let mut statement = connection.prepare(&sql)?;
+        let mut rows = statement.query(params_from_iter(values))?;
+        let mut count = 0;
+        while let Some(row) = rows.next()? {
+            count += 1;
+            if !each(record_from_row(row)?)? {
+                break;
+            }
+        }
+        Ok(count)
     }
 
     pub fn get_lead(&self, id: &str) -> Result<Option<LeadDetail>> {
@@ -1460,20 +1882,20 @@ impl Database {
             .optional()?)
     }
 
-    pub fn delete_leads(&self, ids: &[String]) -> Result<usize> {
+    pub fn delete_leads(&self, ids: &[String]) -> Result<Removed> {
         let connection = self.lock()?;
         let transaction = connection.unchecked_transaction()?;
-        let mut removed = 0;
-        {
-            let mut statement = transaction.prepare("DELETE FROM leads WHERE id = ?")?;
-            let mut sources = transaction.prepare("DELETE FROM lead_sources WHERE lead_id = ?")?;
-            for id in ids {
-                removed += statement.execute(params![id])?;
-                sources.execute(params![id])?;
-            }
-        }
+        mark_doomed(&transaction, ids)?;
+        let label = if ids.len() == 1 { "1 lead".to_string() } else { format!("{} leads", ids.len()) };
+        let undo = trash::open(&transaction, "leads", &label)?;
+        let doomed = "IN (SELECT id FROM temp.doomed)";
+        trash::keep(&transaction, &undo, "leads", &format!("id {doomed}"), &[])?;
+        trash::keep(&transaction, &undo, "lead_sources", &format!("lead_id {doomed}"), &[])?;
+        let count = transaction.execute(&format!("DELETE FROM leads WHERE id {doomed}"), [])?;
+        transaction.execute(&format!("DELETE FROM lead_sources WHERE lead_id {doomed}"), [])?;
+        transaction.execute("DELETE FROM temp.doomed", [])?;
         transaction.commit()?;
-        Ok(removed)
+        Ok(Removed { count, undo })
     }
 
     pub fn query_proxies(&self, query: &ProxyQuery) -> Result<Vec<ProxyEntry>> {
@@ -1712,7 +2134,7 @@ impl Database {
 
 /// One lead inside an open transaction; see `Database::insert_lead`.
 fn insert_lead_row(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &Connection,
     job_id: &str,
     query: &str,
     location: &str,
@@ -1861,6 +2283,26 @@ fn proxy_from_row(row: &Row<'_>) -> rusqlite::Result<ProxyEntry> {
     })
 }
 
+/// Whether a process with this id is still running (and isn't us: a pid
+/// from before a restart can come back as our own).
+fn process_alive(pid: i64) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if u32::try_from(pid).ok() == Some(std::process::id()) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only checks that the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 fn record_from_row(row: &Row<'_>) -> rusqlite::Result<BusinessRecord> {
     let extra_json: String = row.get(14)?;
     let extra = serde_json::from_str(&extra_json).map_err(|error| {
@@ -1977,8 +2419,12 @@ fn open_reader(path: &Path) -> Result<Connection> {
     )
     .with_context(|| format!("open a reader for {}", path.display()))?;
     connection.busy_timeout(Duration::from_secs(5))?;
-    // 64 MB of page cache each, so repeat counts come from memory.
-    connection.execute_batch("PRAGMA cache_size = -65536; PRAGMA temp_store = MEMORY;")?;
+    // 64 MB of page cache each, so repeat counts come from memory, and the
+    // file mapped into memory (shared by every connection) so reads skip a
+    // copy through the cache.
+    connection.execute_batch(
+        "PRAGMA cache_size = -65536; PRAGMA temp_store = MEMORY; PRAGMA mmap_size = 1073741824;",
+    )?;
     Ok(connection)
 }
 
@@ -1997,7 +2443,7 @@ fn shrink_leads(connection: &Connection) -> Result<()> {
         |row| row.get(0),
     )?;
     if carrying > 0 {
-        eprintln!("Shrinking the database: dropping stored raw Maps listings from {carrying} leads (one time, may take a few minutes)…");
+        crate::serverlog::info!("Shrinking the database: dropping stored raw Maps listings from {carrying} leads (one time, may take a few minutes)…");
         connection.execute(
             "UPDATE leads SET extra_json = json_remove(extra_json, '$.raw') WHERE json_type(extra_json, '$.raw') IS NOT NULL",
             [],
@@ -2006,7 +2452,7 @@ fn shrink_leads(connection: &Connection) -> Result<()> {
     connection.execute("UPDATE schema_version SET version = 2", [])?;
     if carrying > 0 {
         connection.execute_batch("VACUUM;")?;
-        eprintln!("Database shrunk.");
+        crate::serverlog::info!("Database shrunk.");
     }
     Ok(())
 }
@@ -2047,6 +2493,104 @@ mod tests {
         );
         assert_eq!(database.stats()?.leads, 1);
         Ok(())
+    }
+
+    fn facet_summary(facets: &LeadFacets) -> String {
+        let list = |items: &[FacetCount]| {
+            items.iter().map(|item| format!("{}={}", item.value, item.count)).collect::<Vec<_>>().join(",")
+        };
+        format!(
+            "total {} | cat {} | state {} | city {} | phone {}/{} | web {}/{} | email {:?} | rating {} {} {} {}",
+            facets.total,
+            list(&facets.categories),
+            list(&facets.states),
+            list(&facets.cities),
+            facets.with_phone,
+            facets.phone_total,
+            facets.with_website,
+            facets.website_total,
+            facets.email,
+            facets.rating_total,
+            facets.rating_3,
+            facets.rating_4,
+            facets.rating_45
+        )
+    }
+
+    #[test]
+    fn one_pass_facets_match_counting_each_facet_alone() {
+        let db = Database::in_memory().unwrap();
+        let categories = ["Dentist", "Plumber", "", "Bakery"];
+        let places = [("Austin", "TX"), ("Dallas", "TX"), ("", "CA"), ("Reno", ""), ("Fresno", "CA")];
+        let mut seed = 7_u64;
+        let mut next = |n: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) % n
+        };
+        for index in 0..240 {
+            let mut lead = record(
+                &format!("Lead {index}"),
+                &format!("p{index}"),
+                categories[next(4) as usize],
+                "1 Main St",
+            );
+            lead.phone = (next(3) > 0).then(|| format!("555{index}"));
+            lead.website = (next(2) > 0).then(|| format!("https://{index}.example"));
+            lead.rating = [None, Some(2.5), Some(3.0), Some(4.2), Some(4.8)][next(5) as usize];
+            let job = ["j1", "j2", "j3"][next(3) as usize];
+            db.insert_lead(job, "q", "l", &lead).unwrap();
+            if next(4) == 0 {
+                db.insert_lead("j2", "q", "l", &lead).unwrap();
+            }
+            let (city, state) = places[next(5) as usize];
+            let (email_count, reach, status): (Option<i64>, &str, Option<&str>) = match next(5) {
+                0 => (Some(2), "safe", Some("done")),
+                1 => (Some(1), "risky", Some("done")),
+                2 => (Some(0), "", Some("failed")),
+                3 => (Some(0), "", Some("queued")),
+                _ => (Some(0), "", None),
+            };
+            db.lock()
+                .unwrap()
+                .execute(
+                    "UPDATE leads SET city = ?1, state = ?2, email_count = ?3, email_reach = nullif(?4, ''),
+                         enrich_status = ?5 WHERE place_id = ?6",
+                    params![city, state, email_count, reach, status, format!("p{index}")],
+                )
+                .unwrap();
+        }
+        let queries = vec![
+            LeadQuery::default(),
+            LeadQuery { sources: vec!["j2".into()], ..Default::default() },
+            LeadQuery { categories: vec!["Dentist".into(), "".into()], ..Default::default() },
+            LeadQuery {
+                sources: vec!["j1".into(), "j3".into()],
+                states: vec!["TX".into()],
+                has_phone: true,
+                ..Default::default()
+            },
+            LeadQuery {
+                cities: vec!["Austin|TX".into(), "Fresno|CA".into()],
+                website: WebsiteFilter::Missing,
+                email: "has".into(),
+                min_rating: Some(4.0),
+                ..Default::default()
+            },
+            LeadQuery {
+                search: "lead 1".into(),
+                categories: vec!["Plumber".into()],
+                website: WebsiteFilter::Has,
+                email: "pending".into(),
+                ..Default::default()
+            },
+            LeadQuery { email: "none".into(), states: vec!["".into()], ..Default::default() },
+        ];
+        for query in queries {
+            let fast = db.count_facets_one_pass(&query).unwrap();
+            let slow = db.count_facets_each(&query).unwrap();
+            assert_eq!(facet_summary(&fast), facet_summary(&slow), "{query:?}");
+            assert_eq!(fast.sources.len(), slow.sources.len(), "{query:?}");
+        }
     }
 
     fn record(name: &str, place: &str, category: &str, address: &str) -> BusinessRecord {
@@ -2130,8 +2674,108 @@ mod tests {
         assert_eq!(sources.get("b"), Some(&1));
 
         // Deleting search b with its leads keeps the lead search a also found.
-        assert_eq!(database.delete_job("b", true)?, 1);
+        let before = database.lead_list_stats()?;
+        let removed = database.delete_job("b", true)?;
+        assert_eq!(removed.count, 1);
         assert_eq!(database.stats()?.leads, 1);
+        assert!(database.get_job("b")?.is_none());
+
+        // Undo brings the search, its lead, its links and its counts back.
+        let restored = database.restore(&removed.undo)?.expect("still in the trash");
+        assert_eq!(restored.kind, "search");
+        assert_eq!(database.stats()?.leads, 2);
+        assert!(database.get_job("b")?.is_some());
+        let after = database.lead_list_stats()?;
+        for job in ["a", "b"] {
+            assert_eq!(after[job].leads, before[job].leads, "{job}");
+            assert_eq!(after[job].with_phone, before[job].with_phone, "{job}");
+            assert_eq!(after[job].first_found, before[job].first_found, "{job}");
+        }
+        // An entry restores once.
+        assert!(database.restore(&removed.undo)?.is_none());
+
+        // Lead deletes undo too, links and all.
+        let ids: Vec<String> = database.lead_ids(&LeadQuery::default())?;
+        let removed = database.delete_leads(&ids)?;
+        assert_eq!(removed.count, 2);
+        assert_eq!(database.stats()?.leads, 0);
+        database.restore(&removed.undo)?.expect("still in the trash");
+        let again = database.lead_list_stats()?;
+        assert_eq!(again["a"].leads, before["a"].leads);
+        assert_eq!(again["b"].leads, before["b"].leads);
         Ok(())
+    }
+}
+
+/// Whether the chosen searches hold at least a fifth of all leads. A page of
+/// such a list is quickest read off the sorted index; a smaller one is
+/// quickest gathered from its own rows.
+fn sources_are_wide(connection: &Connection, sources: &[String]) -> Result<bool> {
+    if sources.is_empty() {
+        return Ok(false);
+    }
+    let marks = vec!["?"; sources.len()].join(", ");
+    let chosen: i64 = connection.query_row(
+        &format!("SELECT coalesce(sum(leads), 0) FROM job_counts WHERE job_id IN ({marks})"),
+        params_from_iter(sources),
+        |row| row.get(0),
+    )?;
+    if chosen == 0 {
+        return Ok(false);
+    }
+    let all: i64 = connection.query_row("SELECT count(*) FROM leads", [], |row| row.get(0))?;
+    Ok(chosen * 5 >= all)
+}
+
+#[cfg(test)]
+mod write_bench {
+    use super::*;
+
+    /// `LOCALLEADS_BENCH_DB=<copy of a big database> cargo test --release
+    /// write_bench -- --ignored --nocapture`: saves website reads from many
+    /// threads at once, as a crawl does.
+    #[test]
+    #[ignore]
+    fn concurrent_enrichment_saves() {
+        let Ok(path) = std::env::var("LOCALLEADS_BENCH_DB") else {
+            return;
+        };
+        let db = Database::open(&path).unwrap();
+        let ids: Vec<String> = {
+            let connection = db.read().unwrap();
+            let mut statement = connection.prepare("SELECT id FROM leads LIMIT 20000").unwrap();
+            statement.query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+        };
+        let mut patch = serde_json::Map::new();
+        patch.insert("emails".into(), serde_json::json!(["a@example.com", "b@example.com"]));
+        patch.insert("socials".into(), serde_json::json!({"facebook": "https://facebook.com/x"}));
+        patch.insert("enrich_error".into(), serde_json::Value::Null);
+        let summary = EnrichSummary {
+            email: Some("a@example.com".into()),
+            email_status: Some("found".into()),
+            email_reach: None,
+            email_count: 2,
+            status: "done".into(),
+        };
+        let threads = 64;
+        let started = Instant::now();
+        std::thread::scope(|scope| {
+            for chunk in ids.chunks(ids.len().div_ceil(threads)) {
+                let (db, patch, summary) = (&db, &patch, &summary);
+                scope.spawn(move || {
+                    for id in chunk {
+                        db.save_enrichment(id, patch, summary).unwrap();
+                    }
+                });
+            }
+        });
+        let took = started.elapsed();
+        // A page read while the saves run should stay quick.
+        println!(
+            "BENCH saves={} threads={threads} took={:.2}s rate={:.0}/s",
+            ids.len(),
+            took.as_secs_f64(),
+            ids.len() as f64 / took.as_secs_f64()
+        );
     }
 }

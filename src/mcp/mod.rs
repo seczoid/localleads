@@ -61,7 +61,13 @@ Typical flow: search_options (valid countries, states, filters, proxy groups) ->
 Searches are called jobs in some ids and fields. Lead lists are per-search: filter browse_leads by search_ids. Leads are deduplicated globally; get_lead shows every search that found a lead.\n\
 Large results are paged: browse_leads and list_proxies take limit (max 1000) and offset and return the total. Use fields to keep rows small, and export_leads to write everything to disk.\n\
 Proxies: add_proxies or import_proxy_file, then check_proxies (runs in the background; poll proxy_status). Group proxies with create_proxy_group and assign_proxies_to_group, then pass proxy_group_id to create_search.\n\
-Destructive tools (delete_*, prune_proxies) cannot be undone; confirm with the user first.";
+Stopped or failed searches: continue_search carries them on from where they stopped; rerun_search starts a fresh copy.\n\
+Destructive tools (delete_*, prune_proxies) return an undo_id; undo_delete restores it within 60 minutes, after which it is gone for good. Confirm with the user before deleting.";
+
+/// How many tools agents get, for the docs.
+pub fn tool_count() -> usize {
+    LocalLeadsMcp::router().list_all().len()
+}
 
 impl LocalLeadsMcp {
     pub fn new(state: SharedState, mode: EngineMode) -> Self {
@@ -139,7 +145,8 @@ impl ServerHandler for LocalLeadsMcp {
 // ------------------------------------------------------------------ HTTP
 
 /// Cancelled on shutdown so open MCP streams don't hold the server open.
-fn shutdown_token() -> &'static CancellationToken {
+/// Cancelled when the web server shuts down.
+pub(crate) fn shutdown_token() -> &'static CancellationToken {
     static TOKEN: OnceLock<CancellationToken> = OnceLock::new();
     TOKEN.get_or_init(Default::default)
 }
@@ -255,6 +262,15 @@ pub(crate) fn portable_schema(value: &mut serde_json::Value) {
 }
 
 /// Pretty JSON for the agent.
+/// A delete's undo id for its reply: null when nothing was deleted.
+pub(super) fn undo_id(count: usize, undo: String) -> serde_json::Value {
+    if count == 0 || undo.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(undo)
+    }
+}
+
 pub(crate) fn reply(value: impl Serialize) -> ToolResult {
     serde_json::to_string_pretty(&value).map_err(|error| error.to_string())
 }

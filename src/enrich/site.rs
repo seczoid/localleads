@@ -15,7 +15,15 @@ use webclaw_fetch::{FetchClient, FetchConfig};
 /// Pages read per site, the home page included.
 const MAX_PAGES: usize = 8;
 /// Pages read at once for one site.
-const PAGES_AT_ONCE: usize = 4;
+const PAGES_AT_ONCE: usize = MAX_PAGES;
+/// Longest time one site may take, all its pages together. A site this
+/// slow holds a slot that other sites could use; what it showed by then
+/// is kept.
+const SITE_BUDGET: Duration = Duration::from_secs(40);
+/// Contact pages read before deciding whether the rest are needed.
+const FIRST_ROUND: usize = 3;
+/// `page_score` of pages that usually list contacts (about and up).
+const CONTACT_SCORE: u32 = 60;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SiteEmail {
@@ -70,8 +78,8 @@ impl SiteReader {
     /// through the search's proxies (those are for Google and SMTP).
     pub fn new() -> anyhow::Result<Self> {
         let config = FetchConfig {
-            timeout: Duration::from_secs(15),
-            total_timeout: Some(Duration::from_secs(30)),
+            timeout: Duration::from_secs(12),
+            total_timeout: Some(Duration::from_secs(24)),
             ..FetchConfig::default()
         };
         let client = FetchClient::new(config).map_err(|error| anyhow::anyhow!("set up website reader: {error}"))?;
@@ -80,6 +88,7 @@ impl SiteReader {
         })
     }
 
+    /// Reads a site within [`SITE_BUDGET`]: what was read by then is kept.
     pub async fn read(&self, website: &str) -> SiteReport {
         let Some(start) = normalize(website) else {
             return SiteReport {
@@ -87,50 +96,86 @@ impl SiteReader {
                 ..SiteReport::default()
             };
         };
-        let mut report = SiteReport::default();
-        let mut collector = Collector::default();
+        let deadline = tokio::time::Instant::now() + SITE_BUDGET;
 
         let home = match self.client.fetch(start.as_str()).await {
             Ok(page) if page.status < 400 => page,
             Ok(page) => {
-                report.error = Some(format!("home page answered {}", page.status));
-                return report;
+                return SiteReport {
+                    error: Some(format!("home page answered {}", page.status)),
+                    ..SiteReport::default()
+                };
             }
             Err(error) => {
-                report.error = Some(error.to_string());
-                return report;
+                return SiteReport {
+                    error: Some(error.to_string()),
+                    ..SiteReport::default()
+                };
             }
         };
-        report.url = home.url.clone();
         let base = Url::parse(&home.url).unwrap_or(start);
         let site = emails::base_domain(base.host_str().unwrap_or_default());
-        read_meta(&home.html, &mut report);
-        collector.page(&home.url, &home.html);
-        let mut seen: BTreeSet<String> = BTreeSet::from([canonical(&home.url)]);
+        // Parsing runs on the blocking pool so hundreds of sites at once
+        // never stall the threads that move the network traffic.
+        let home_site = site.clone();
+        let Ok((mut report, mut collector, ranked)) = tokio::task::spawn_blocking(move || {
+            let mut report = SiteReport {
+                url: home.url.clone(),
+                ..SiteReport::default()
+            };
+            read_meta(&home.html, &mut report);
+            let mut collector = Collector::default();
+            collector.page(&home.url, &home.html);
+            // Contact-ish pages linked from the home page, best first.
+            let mut ranked: Vec<(u32, String)> = webclaw_core::page_anchors(&home.html, &home.url)
+                .into_iter()
+                .filter_map(|anchor| {
+                    let url = Url::parse(&anchor.href).ok()?;
+                    if emails::base_domain(url.host_str()?) != home_site || is_asset(&url) {
+                        return None;
+                    }
+                    let score = page_score(url.path(), &anchor.text);
+                    (score > 0).then(|| (score, url.to_string()))
+                })
+                .collect();
+            ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.len().cmp(&b.1.len())));
+            (report, collector, ranked)
+        })
+        .await
+        else {
+            return SiteReport {
+                error: Some("couldn't read the home page".to_owned()),
+                ..SiteReport::default()
+            };
+        };
+        let mut seen: BTreeSet<String> = BTreeSet::from([canonical(&report.url)]);
 
-        // Contact-ish pages linked from the home page, best first.
-        let mut ranked: Vec<(u32, String)> = webclaw_core::page_anchors(&home.html, &home.url)
-            .into_iter()
-            .filter_map(|anchor| {
-                let url = Url::parse(&anchor.href).ok()?;
-                if emails::base_domain(url.host_str()?) != site || is_asset(&url) {
-                    return None;
-                }
-                let score = page_score(url.path(), &anchor.text);
-                (score > 0).then(|| (score, url.to_string()))
-            })
-            .collect();
-        ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.len().cmp(&b.1.len())));
-        let mut queue: Vec<String> = Vec::new();
-        for (_, url) in ranked {
+        let mut queue: Vec<(u32, String)> = Vec::new();
+        for (score, url) in ranked {
             if queue.len() + 1 >= MAX_PAGES {
                 break;
             }
             if seen.insert(canonical(&url)) {
-                queue.push(url);
+                queue.push((score, url));
             }
         }
-        self.read_pages(&queue, &mut collector).await;
+        // The pages that list contacts first (contact, imprint, team,
+        // about). The rest (privacy, careers, …) only when those didn't
+        // turn up an address on the company's own domain: they rarely add
+        // one, and skipping them reads far fewer pages per site.
+        let split = queue
+            .iter()
+            .take(FIRST_ROUND)
+            .take_while(|(score, _)| *score >= CONTACT_SCORE)
+            .count()
+            .max(1)
+            .min(queue.len());
+        let (first, rest) = queue.split_at(split);
+        let urls = |pages: &[(u32, String)]| pages.iter().map(|(_, url)| url.clone()).collect::<Vec<_>>();
+        self.read_pages(&urls(first), &mut collector, deadline).await;
+        if !collector.has_own_email(&site) {
+            self.read_pages(&urls(rest), &mut collector, deadline).await;
+        }
 
         // Nothing yet: try the usual contact paths the menu may hide.
         if collector.emails.is_empty() {
@@ -141,7 +186,7 @@ impl SiteReader {
                 .filter(|url| seen.insert(canonical(url)))
                 .take(MAX_PAGES.saturating_sub(1 + queue.len()).max(2))
                 .collect();
-            self.read_pages(&guesses, &mut collector).await;
+            self.read_pages(&guesses, &mut collector, deadline).await;
         }
 
         report.pages = collector.pages;
@@ -152,17 +197,38 @@ impl SiteReader {
         report
     }
 
-    async fn read_pages(&self, urls: &[String], collector: &mut Collector) {
-        let pages: Vec<_> = futures::stream::iter(urls.iter().cloned())
+    /// Reads `urls` all at once and adds what they show to `collector`.
+    /// Pages still loading at `deadline` are dropped.
+    async fn read_pages(
+        &self,
+        urls: &[String],
+        collector: &mut Collector,
+        deadline: tokio::time::Instant,
+    ) {
+        if urls.is_empty() {
+            return;
+        }
+        let read = futures::stream::iter(urls.iter().cloned())
             .map(|url| {
                 let client = Arc::clone(&self.client);
-                async move { client.fetch(&url).await.ok().filter(|page| page.status < 400) }
+                async move {
+                    let page = client.fetch(&url).await.ok().filter(|page| page.status < 400)?;
+                    tokio::task::spawn_blocking(move || {
+                        let mut found = Collector::default();
+                        found.page(&page.url, &page.html);
+                        found
+                    })
+                    .await
+                    .ok()
+                }
             })
             .buffer_unordered(PAGES_AT_ONCE)
-            .collect()
-            .await;
-        for page in pages.into_iter().flatten() {
-            collector.page(&page.url, &page.html);
+            .filter_map(std::future::ready)
+            .collect::<Vec<_>>();
+        if let Ok(found) = tokio::time::timeout_at(deadline, read).await {
+            for page in found {
+                collector.merge(page);
+            }
         }
     }
 }
@@ -178,6 +244,47 @@ struct Collector {
 }
 
 impl Collector {
+    /// Whether an address on the site's own domain turned up.
+    fn has_own_email(&self, site: &str) -> bool {
+        self.emails
+            .keys()
+            .any(|email| emails::base_domain(email.rsplit('@').next().unwrap_or_default()) == site)
+    }
+
+    /// Adds what another page showed. Pages are kept in the order they were
+    /// added; an address keeps its first page and its plainest form.
+    fn merge(&mut self, other: Collector) {
+        self.pages.extend(other.pages);
+        for (email, (found, page)) in other.emails {
+            self.emails
+                .entry(email)
+                .and_modify(|current| {
+                    if found < current.0 {
+                        current.0 = found;
+                    }
+                })
+                .or_insert((found, page));
+        }
+        self.phones.extend(other.phones);
+        for (mine, theirs) in [
+            (&mut self.socials.linkedin, other.socials.linkedin),
+            (&mut self.socials.facebook, other.socials.facebook),
+            (&mut self.socials.instagram, other.socials.instagram),
+            (&mut self.socials.x, other.socials.x),
+            (&mut self.socials.youtube, other.socials.youtube),
+            (&mut self.socials.tiktok, other.socials.tiktok),
+        ] {
+            if mine.is_none() {
+                *mine = theirs;
+            }
+        }
+        for contact in other.contacts {
+            if !self.contacts.iter().any(|known| known.name == contact.name) {
+                self.contacts.push(contact);
+            }
+        }
+    }
+
     fn page(&mut self, url: &str, html: &str) {
         self.pages.push(url.to_owned());
         for found in emails::extract(html) {
@@ -515,5 +622,51 @@ mod tests {
         assert_eq!(people.len(), 1);
         assert_eq!(people[0].title.as_deref(), Some("Owner"));
         assert_eq!(people[0].email.as_deref(), Some("j.seawright@acme.com"));
+    }
+
+    /// Reads the sites listed in `SITE_BENCH_FILE` (one per line),
+    /// `SITE_BENCH_AT_ONCE` at a time, and prints how fast and how well.
+    /// `cargo test --release site_bench -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "reads real websites"]
+    async fn site_bench() {
+        use futures::StreamExt;
+        let Ok(file) = std::env::var("SITE_BENCH_FILE") else { return };
+        let at_once: usize = std::env::var("SITE_BENCH_AT_ONCE").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+        let sites: Vec<String> = std::fs::read_to_string(file).unwrap().lines().map(str::to_owned).collect();
+        let reader = std::sync::Arc::new(SiteReader::new().unwrap());
+        let started = std::time::Instant::now();
+        let results: Vec<(f64, SiteReport)> = futures::stream::iter(sites)
+            .map(|site| {
+                let reader = reader.clone();
+                async move {
+                    let begun = std::time::Instant::now();
+                    let report = reader.read(&site).await;
+                    (begun.elapsed().as_secs_f64(), report)
+                }
+            })
+            .buffer_unordered(at_once)
+            .collect()
+            .await;
+        let total = started.elapsed().as_secs_f64();
+        let mut times: Vec<f64> = results.iter().map(|(t, _)| *t).collect();
+        times.sort_by(f64::total_cmp);
+        let read = results.iter().filter(|(_, r)| !r.pages.is_empty()).count();
+        let with_email = results.iter().filter(|(_, r)| !r.emails.is_empty()).count();
+        let pages: usize = results.iter().map(|(_, r)| r.pages.len()).sum();
+        let emails: usize = results.iter().map(|(_, r)| r.emails.len()).sum();
+        let own: usize = results.iter().filter(|(_, r)| r.emails.first().is_some_and(|e| {
+            let host = Url::parse(&r.url).ok().and_then(|u| u.host_str().map(str::to_owned)).unwrap_or_default();
+            emails::base_domain(e.email.rsplit('@').next().unwrap_or_default()) == emails::base_domain(&host)
+        })).count();
+        let pct = |p: f64| times[((times.len() as f64 - 1.0) * p) as usize];
+        println!(
+            "BENCH sites={} at_once={at_once} total={total:.1}s rate={:.0}/min read={read} with_email={with_email} own_domain={own} emails={emails} pages={pages} p50={:.1}s p90={:.1}s max={:.1}s",
+            results.len(),
+            results.len() as f64 * 60.0 / total,
+            pct(0.5),
+            pct(0.9),
+            pct(1.0),
+        );
     }
 }

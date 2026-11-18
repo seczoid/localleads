@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}System{% endblock %}
+{% block heading %}<h1>System</h1>{% endblock %}
+{% block sub %}<p class="page-sub">LocalLeads {{ version }}<span class="sep">·</span>running for {{ uptime }}</p>{% endblock %}
+{% block content %}
+<div class="settings system">
+  <section class="set-row">
+    <div class="set-label">
+      <h2>Server</h2>
+      <p>The LocalLeads process serving this page.</p>
+    </div>
+    <div class="set-body">
+      <dl class="kv">
+        <dt>Version</dt><dd>{{ version }}</dd>
+        <dt>Started</dt><dd>{{ started }} <span class="muted">({{ uptime }} ago)</span></dd>
+        <dt>Process id</dt><dd class="mono">{{ pid }}</dd>
+        <dt>Searches running</dt><dd>{{ running }}</dd>
+        <dt>Stored</dt><dd>{{ searches }} searches, {{ leads }} leads</dd>
+        <dt>Database</dt><dd class="mono break">{{ db_path }} <span class="muted">({{ db_size }})</span></dd>
+      </dl>
+    </div>
+  </section>
+
+  <section class="system-log" x-data="serverLog">
+    <div class="system-log-head">
+      <div>
+        <h2>Server log</h2>
+        <p class="muted small">Everything the server printed since it started: searches starting and ending, imports, updates, and errors. The newest line is on top.</p>
+      </div>
+      <label class="check follow"><input type="checkbox" x-model="follow"> Follow new lines</label>
+    </div>
+    <div class="toolbar wrap log-tools">
+      <input type="search" class="grow" placeholder="Find in the log…" aria-label="Find in the server log" x-model.debounce.150ms="q" @keydown.escape="q = ''">
+      <select aria-label="Show" x-model="level">
+        <option value="">All lines</option>
+        <option value="error">Errors only</option>
+        <option value="warn">Warnings only</option>
+        <option value="info">Info only</option>
+      </select>
+      <button type="button" class="btn sm" @click="copyAll()" :disabled="!shown.length">Copy <span x-text="filtered ? 'shown' : 'all'">all</span></button>
+      <a class="btn sm" :href="downloadUrl()" href="/system/log.txt" hx-boost="false" download>Download .txt</a>
+    </div>
+    <ol class="log tall server-log" aria-live="polite">
+      <template x-if="!lines.length"><li class="log-empty" x-text="loaded ? 'Nothing logged yet.' : 'Loading…'"></li></template>
+      <template x-for="line in shown" :key="line.seq">
+        <li :class="line.level" :data-level="line.level"><time x-text="line.time"></time><span class="lvl" x-text="line.level"></span><span class="msg" x-text="line.message"></span><button type="button" class="log-copy" data-copy-line title="Copy this line" aria-label="Copy this line"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-copy"/></svg></button></li>
+      </template>
+    </ol>
+    <p class="log-none muted small" x-show="filtered && lines.length && !shown.length" x-cloak>No lines match. <button type="button" class="link" @click="q = ''; level = ''">Clear the filter</button></p>
+    <div class="log-foot muted small"><span x-text="summary()"></span></div>
+  </section>
+</div>
+{% endblock %}

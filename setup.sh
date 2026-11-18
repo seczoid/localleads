@@ -886,7 +886,7 @@ ExecStart=$BIN
 WorkingDirectory=$DATA_DIR
 Restart=on-failure
 RestartSec=3
-# Lets running searches stop cleanly; they resume as "interrupted".
+# Running searches carry on where they were after a restart.
 TimeoutStopSec=30
 LimitNOFILE=65536
 
@@ -1360,7 +1360,8 @@ finish() {
 	say ""
 	say "  Settings: $ENV_FILE"
 	say "  Data:     $DATA_DIR"
-	say "  Connect AI agents over MCP from the app: MCP, in the sidebar."
+	say "  New versions show up in the app's sidebar, ready to install with one click."
+	say "  Connect AI agents over MCP from the app: Agents, in the sidebar."
 	say ""
 }
 

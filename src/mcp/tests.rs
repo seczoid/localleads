@@ -242,6 +242,7 @@ fn every_dashboard_capability_has_a_tool() {
         // searches
         "search_options",
         "find_cities",
+        "find_categories",
         "preview_search",
         "create_search",
         "rerun_search",
@@ -250,6 +251,7 @@ fn every_dashboard_capability_has_a_tool() {
         "pause_search",
         "resume_search",
         "stop_search",
+        "continue_search",
         "delete_search",
         // leads
         "browse_leads",
@@ -280,6 +282,8 @@ fn every_dashboard_capability_has_a_tool() {
         "update_checker_settings",
         // dashboard and settings
         "overview",
+        "undo_delete",
+        "server_log",
         "app_info",
         "list_notices",
         "backup_database",

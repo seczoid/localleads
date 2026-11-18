@@ -1,0 +1,18 @@
+<div class="menu-wrap" x-data="dropdown()" @click.outside="open = false" @scroll.window.capture="open = false" @resize.window="open = false">
+  <button type="button" class="btn sm ghost icon-only-sm" x-ref="button" @click="toggle()" :aria-expanded="open" aria-label="More actions for {{ job.name }}">
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-more"/></svg>
+  </button>
+  <div class="menu floating" x-ref="menu" x-show="open" x-cloak x-transition.opacity @click="open = false">
+    <a href="/jobs/{{ job.id }}">Progress and setup</a>
+    <a href="/leads/export.csv?source={{ job.id }}" hx-boost="false">Export CSV</a>
+    <button type="button" @click="open = false; llCsvColumns('source={{ job.id }}')">Choose CSV columns…</button>
+    <a href="/leads/export.json?source={{ job.id }}" hx-boost="false">Export JSON</a>
+    <hr>
+    <a href="/jobs/new?from={{ job.id }}">Duplicate and edit</a>
+    {% if job.can_continue %}<button hx-post="/jobs/{{ job.id }}/continue">Continue where it stopped</button>{% endif %}
+    {% if !job.active %}<button hx-post="/jobs/{{ job.id }}/rerun" hx-confirm="Run a new search with the same settings?">Run again</button>
+    <hr>
+    <button class="danger" hx-post="/jobs/{{ job.id }}/delete" hx-confirm="Delete this search? Its leads are kept.">Delete search</button>
+    <button class="danger" hx-post="/jobs/{{ job.id }}/delete?leads=1" hx-confirm="Delete this search and the leads only it found? Leads other searches also found are kept. You can undo this for an hour.">Delete search and its leads</button>{% endif %}
+  </div>
+</div>

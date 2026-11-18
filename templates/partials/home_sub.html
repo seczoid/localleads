@@ -1,0 +1,3 @@
+<p class="page-sub" id="home-sub"{% if oob %} hx-swap-oob="true"{% endif %}>
+  <b>{{ totals.leads }}</b> leads<span class="sep">·</span><b>{{ totals.searches }}</b> {% if totals.searches == "1" %}search{% else %}searches{% endif %}<span class="sep">·</span>{% if totals.has_proxies %}<a class="link quiet" href="/proxies"><b>{{ totals.healthy }}</b> of {{ totals.proxies }} proxies healthy</a>{% else %}<a class="link quiet" href="/proxies">No proxies yet</a>{% endif %}
+</p>

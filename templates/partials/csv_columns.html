@@ -1,0 +1,62 @@
+<div class="modal-backdrop" x-data="csvColumns" data-filters="{{ filters }}" data-essentials="{{ essentials }}" @keydown.escape.window="$root.remove()" @click.self="$root.remove()">
+  <div class="modal wide csv-modal" role="dialog" aria-modal="true" aria-labelledby="csv-columns-title">
+    <header class="modal-head">
+      <div>
+        <h2 id="csv-columns-title">Download CSV</h2>
+        <p class="muted" x-show="style === 'clean'"><span x-text="clean.length">{{ clean_total }}</span> of {{ clean_total }} columns · one row per business. Your choice is kept for next time.</p>
+        <p class="muted" x-show="style === 'outscraper'" x-cloak><span x-text="chosen.length">{{ total }}</span> of {{ total }} columns · the same names Outscraper uses, for tools that expect them.</p>
+      </div>
+      <button type="button" class="icon-btn" @click="$root.remove()" aria-label="Close"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
+    </header>
+
+    <div class="csv-style" role="radiogroup" aria-label="CSV layout">
+      <button type="button" role="radio" :aria-checked="style === 'clean'" @click="style = 'clean'">
+        <strong>Clean</strong>
+        <span>Readable column names, one row per business, best email first, hours written out.</span>
+      </button>
+      <button type="button" role="radio" :aria-checked="style === 'outscraper'" @click="style = 'outscraper'">
+        <strong>Outscraper format</strong>
+        <span>Every raw field with Outscraper's column names, one row per email.</span>
+      </button>
+    </div>
+
+    <div class="modal-body csv-groups" x-show="style === 'clean'">
+      {% for (name, columns) in clean %}
+      <fieldset class="csv-group" data-cols="{% for (id, _h) in columns %}{{ id }} {% endfor %}">
+        <legend>{{ name }} <button type="button" class="link quiet small" @click="toggleClean($el.closest('fieldset').dataset.cols)" x-text="cleanFull($el.closest('fieldset').dataset.cols) ? 'Clear' : 'Pick all'">Clear</button></legend>
+        <div class="csv-cols csv-clean-cols">
+          {% for (id, header) in columns %}<label class="check"><input type="checkbox" value="{{ id }}" x-model="clean"><span>{{ header }}</span></label>
+          {% endfor %}
+        </div>
+      </fieldset>
+      {% endfor %}
+    </div>
+
+    <div class="csv-tools" x-show="style === 'outscraper'" x-cloak>
+      <div class="segmented" role="group" aria-label="Presets">
+        <button type="button" @click="preset('essentials')" :aria-pressed="is('essentials')">Essentials</button>
+        <button type="button" @click="preset('all')" :aria-pressed="is('all')">All</button>
+        <button type="button" @click="preset('none')" :aria-pressed="chosen.length === 0">None</button>
+      </div>
+      <input type="search" placeholder="Find a column…" aria-label="Find a column" x-model="find">
+    </div>
+    <div class="modal-body csv-groups" x-show="style === 'outscraper'" x-cloak>
+      {% for (name, columns) in groups %}
+      <fieldset class="csv-group" data-cols="{{ columns|join(" ") }}" x-show="!find.trim() || $el.dataset.cols.includes(find.trim().toLowerCase())">
+        <legend>{{ name }} <button type="button" class="link quiet small" @click="toggleGroup($el.closest('fieldset').dataset.cols)" x-text="groupFull($el.closest('fieldset').dataset.cols) ? 'Clear' : 'Pick all'">Pick all</button></legend>
+        <div class="csv-cols csv-raw-cols">
+          {% for column in columns %}<label class="check" x-show="!find.trim() || '{{ column }}'.includes(find.trim().toLowerCase())"><input type="checkbox" value="{{ column }}" x-model="chosen"><span class="mono">{{ column }}</span></label>
+          {% endfor %}
+        </div>
+      </fieldset>
+      {% endfor %}
+    </div>
+
+    <footer class="modal-foot">
+      <span class="muted small csv-rows" x-text="rowsNote()"></span>
+      <span class="spacer"></span>
+      <button type="button" class="btn" @click="$root.remove()">Cancel</button>
+      <a class="btn primary" :href="url()" href="/leads/export.csv" hx-boost="false" download :aria-disabled="!picked().length" :class="{ disabled: !picked().length }" @click="if (!picked().length) { $event.preventDefault(); return; } save(); setTimeout(() => $root.remove(), 60)">Download CSV</a>
+    </footer>
+  </div>
+</div>

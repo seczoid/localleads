@@ -1,13 +1,13 @@
 {% extends "base.html" %}
-{% block title %}Docs{% endblock %}
-{% block heading %}<h1>Docs</h1><span class="muted">How LocalLeads works</span>{% endblock %}
+{% block title %}Help{% endblock %}
+{% block heading %}<h1>Help</h1>{% endblock %}
+{% block sub %}<p class="page-sub">How LocalLeads works, from your first search to exporting leads.</p>{% endblock %}
 {% block actions %}<a class="btn primary" href="/jobs/new">Start a search</a>{% endblock %}
 {% block content %}
 <div class="docs" x-data="{ on: 'overview' }" x-init="
   const io = new IntersectionObserver((entries) => entries.forEach((e) => { if (e.isIntersecting) on = e.target.id; }), { rootMargin: '-15% 0px -75% 0px' });
   $el.querySelectorAll('.doc-section').forEach((s) => io.observe(s));">
   <nav class="docs-toc" aria-label="On this page">
-    <span class="list-kicker">On this page</span>
     <a href="#overview" :class="on === 'overview' && 'on'">Overview</a>
     <a href="#quick-start" :class="on === 'quick-start' && 'on'">Quick start</a>
     <a href="#account" :class="on === 'account' && 'on'">Your account</a>
@@ -18,34 +18,33 @@
     <a href="#proxies" :class="on === 'proxies' && 'on'">Proxies</a>
     <a href="#mcp" :class="on === 'mcp' && 'on'">AI agents (MCP)</a>
     <a href="#backups" :class="on === 'backups' && 'on'">Backups</a>
+    <a href="#system" :class="on === 'system' && 'on'">Server log and updates</a>
     <a href="#help" :class="on === 'help' && 'on'">Troubleshooting</a>
   </nav>
 
   <article class="docs-article">
-    <section class="card doc-section" id="overview">
-      <span class="list-kicker">Overview</span>
+    <section class="doc-section" id="overview">
       <h2>Local business leads from Google Maps, with their emails</h2>
-      <p class="doc-lead">LocalLeads searches Google Maps for any kind of business in any area, saves every result to a database on this computer, and reads each business's website for emails, socials and phone numbers while the search runs.</p>
+      <p class="doc-lead">LocalLeads searches Google Maps for any kind of business in any country, saves every result to a database on this computer, and reads each business's website for emails, socials and phone numbers while the search runs.</p>
       <div class="doc-cards">
         <a class="doc-card" href="#new-search"><b>1 · Search</b>Pick what and where: "roofers" across Texas, every ZIP code in a city, or a list of places.</a>
         <a class="doc-card" href="#emails"><b>2 · Enrich</b>Websites are read for emails, socials and phones. Google place pages add reviews and owner details.</a>
-        <a class="doc-card" href="#leads"><b>3 · Use</b>Filter, browse and export to CSV or JSON, or let an AI agent do it for you over MCP.</a>
+        <a class="doc-card" href="#leads"><b>3 · Use</b>Filter, browse and export a clean CSV or JSON, or let an AI agent do it for you over MCP.</a>
       </div>
       <figure class="shot">
-        <img src="/static/docs/dashboard.jpg" alt="The dashboard: totals, running searches and recent leads" loading="lazy" width="1440" height="900">
-        <figcaption>The dashboard shows totals, searches in progress and the newest leads.</figcaption>
+        <img src="/static/docs/dashboard.png" alt="Searches: totals, anything running, and every search with its leads" loading="lazy" width="1440" height="900">
+        <figcaption>Searches is the home page: totals at the top, anything running, then every search with how many of its leads have a phone and a website.</figcaption>
       </figure>
       <p>Everything stays on this machine: no account, no cloud, no AI in the extraction. Pages are read and addresses pulled out by fixed rules, so results are repeatable.</p>
     </section>
 
-    <section class="card doc-section" id="quick-start">
-      <span class="list-kicker">Quick start</span>
+    <section class="doc-section" id="quick-start">
       <h2>Your first search in a minute</h2>
       <ol>
-        <li>Start the server and open <a href="/">this dashboard</a> (it runs at <code>http://127.0.0.1:7878</code>). The first time, create your account with an email and password.</li>
-        <li>Click <b>New search</b>. Type what you're looking for, like <code>plumbers</code>.</li>
-        <li>Pick a place under <b>Where?</b>, a state, a few cities or ZIP codes.</li>
-        <li>Leave <b>Find emails</b> ticked and press <b>Start search</b>.</li>
+        <li>Start the server and open <a href="/">the app</a> (it runs at <code>http://127.0.0.1:7878</code>). The first time, create your account with an email and password.</li>
+        <li>Click <b>New search</b>. Start typing what you're looking for, like <code>plumb</code>, and pick <b>Plumber</b> from the list.</li>
+        <li>Pick a place under <b>Where?</b>: a country, then a state, a few cities or ZIP codes.</li>
+        <li>Leave <b>Find emails</b> ticked under <b>Extras</b> and press <b>Start search</b>.</li>
         <li>Leads appear within seconds. Open <b>Leads</b> to browse and export them.</li>
       </ol>
       <div class="snippet">
@@ -55,86 +54,85 @@
       <p>Useful options: <code>--db PATH</code> uses another database file, <code>--bind 127.0.0.1:7879</code> picks another port.</p>
     </section>
 
-    <section class="card doc-section" id="account">
-      <span class="list-kicker">Your account</span>
+    <section class="doc-section" id="account">
       <h2>Signing in</h2>
       <p>The first time LocalLeads opens a database, it asks for an email and a password (twice) and creates the one account for that database. After that, you sign in with them. Each sign-in lasts 30 days on that browser.</p>
       <ul>
-        <li><b>Sign out</b> is at the bottom of the sidebar, and on <a href="/settings#account">Settings</a>.</li>
+        <li><b>Sign out</b> is in the Account menu at the bottom of the sidebar, and on <a href="/settings#account">Settings</a>.</li>
         <li><b>Change password</b> on <a href="/settings#account">Settings</a>: enter the current one and the new one twice. Every other browser is signed out; API keys keep working.</li>
         <li>There's no password reset and no second account. If you lose the password, start over with a new database file (<code>--db</code>), or restore a backup made before the password changed.</li>
       </ul>
       <p>The password is stored as an Argon2 hash. Sign-in tokens and API keys are stored only as hashes, so a copy of the database can't be used to sign in.</p>
     </section>
 
-    <section class="card doc-section" id="new-search">
-      <span class="list-kicker">New search</span>
+    <section class="doc-section" id="new-search">
       <h2>Setting up a search</h2>
       <figure class="shot">
-        <img src="/static/docs/new-search.jpg" alt="The new search form" loading="lazy" width="1440" height="900">
-        <figcaption>The summary on the right shows how many lookups the search will make before you start it.</figcaption>
+        <img src="/static/docs/new-search.png" alt="The new search form with the category list open" loading="lazy" width="1440" height="900">
+        <figcaption>Type a few letters to pick from Google Maps' own categories. The card on the right shows how many lookups the search makes, how long it may take and what it collects, before you start it.</figcaption>
       </figure>
       <h3>What and where</h3>
       <ul>
-        <li><b>What are you looking for?</b> One kind of business per line. Each one is searched in every area.</li>
-        <li><b>Where?</b> Pick a country, then whole states, single cities, ZIP codes, or type your own places. Google only shows a limited number of results per lookup, so a big area is searched ZIP code by ZIP code, busiest first, to get as many as Google Maps has.</li>
+        <li><b>What are you looking for?</b> Start typing and pick from the categories Google Maps itself uses, like <i>Roofing contractor</i> or <i>Dentist</i>; closest matches come first. The <b>Groups</b> tab lists them by industry, with <b>Select all</b> for a whole group. Anything else, like a brand name, press <b>Enter</b> to search for it exactly as typed. You can also paste a list. Each one is searched in every area.</li>
+        <li><b>Where?</b> Pick any country, then the whole country, some states or provinces, single cities, ZIP or postal codes, or type your own places. Google only shows about 120 results per lookup, so a big area is split into smaller ones (<b>Split into</b> ZIP codes, cities or whole states) and searched busiest first, to get as many as Google Maps has.</li>
       </ul>
       <h3>How many</h3>
       <ul>
-        <li><b>Maximum results</b> stops the search once that many new leads are saved. <b>No limit</b> gets everything Google shows.</li>
+        <li><b>Stop after</b> ends the search once that many new leads are saved. <b>No limit</b> gets everything Google Maps has.</li>
         <li>Leads already in your database aren't saved twice. They count as <b>repeats skipped</b>, which is normal when areas overlap.</li>
       </ul>
-      <h3>Enrich each lead</h3>
+      <h3>Extras for each lead</h3>
       <ul>
-        <li><b>Find emails</b> reads up to 8 pages of each website: the home page, then contact, about and team pages.</li>
-        <li><b>Google place page</b> adds reviews per star, review topics, owner and photos.</li>
+        <li><b>Find emails</b> reads up to 8 pages of each website: the home page, then contact, about and team pages. Socials, phones and site details come with it.</li>
+        <li><b>Open the Google place page</b> adds reviews per star, review topics, owner and photos.</li>
         {% if can_verify %}<li><b>Verify emails</b> asks each email's mail server whether the address exists. It's slower and off by default. Found emails show up right away either way.</li>{% endif %}
       </ul>
-      <h3>Proxies and speed</h3>
-      <p><b>Requests at once</b> sets how many Google lookups run at the same time. Without proxies keep it around 10, or Google starts refusing requests. With a few hundred proxies, 100 to 300 works. Websites are always read directly and quickly, 64 at a time, whatever you set here.</p>
-      <p>Under <b>Advanced</b> you can name the search, add filters (rating, reviews, has website and more), change the language and choose the columns to export.</p>
+      <h3>Speed and proxies</h3>
+      <p><b>Requests at once</b> sets how many Google lookups run at the same time. Without proxies keep it around 10, or Google starts refusing requests. With a few hundred healthy proxies, 100 to 300 works. <b>Proxy group</b> limits the search to one group of proxies.</p>
+      <p>Under <b>Advanced</b> you can name the search, search by Google Maps URL or place ID instead of text, add filters (rating, reviews, has website and more), change the language and region, and set retries.</p>
     </section>
 
-    <section class="card doc-section" id="watching">
-      <span class="list-kicker">Watching a search</span>
+    <section class="doc-section" id="watching">
       <h2>Live progress</h2>
       <figure class="shot">
-        <img src="/static/docs/search-live.jpg" alt="A running search with its live progress line and event log" loading="lazy" width="1440" height="900">
-        <figcaption>A search updates live while it runs. You can pause, stop or run it again.</figcaption>
+        <img src="/static/docs/search-live.png" alt="A search's page: progress at the top, then its leads, activity and setup in tabs" loading="lazy" width="1440" height="900">
+        <figcaption>Each search has its own page that updates live while it runs: progress at the top, then its leads, activity log and setup. You can pause, stop or run it again.</figcaption>
       </figure>
-      <p>The blue line under the title reads like this:</p>
+      <p>The progress card has two halves:</p>
       <ul>
-        <li><b>12 of 40 areas searched</b> means Google lookups done out of the total.</li>
-        <li><b>860 leads</b> means new businesses saved so far.</li>
-        <li><b>700 enriched</b> means leads whose website and place page have been read.</li>
-        <li><b>420 with email</b> means leads where at least one email was found.</li>
-        <li><b>checking emails of 35</b> only appears when verification is on. It counts leads waiting for their mail-server check.</li>
+        <li><b>Google Maps</b>: new leads saved out of the target, then <b>areas searched</b> out of the total and <b>repeats skipped</b> (businesses already in your database).</li>
+        <li><b>Websites</b>: sites read so far, how many had an email, the reading speed and about how long is left. Leads that another search already read count straight away.</li>
       </ul>
-      <p>Websites are read alongside the Google search, so emails appear while it's still collecting. When the server restarts, a running search is marked <b>interrupted</b>. Use <b>Run again</b> to start it over; leads you already have are skipped.</p>
+      <p>The <b>Activity</b> tab is the search's log: every step, retry and failure, with a filter and a download. <b>Setup</b> shows exactly what the search was started with.</p>
+      <ul>
+        <li><b>Pause</b> and <b>Resume</b> hold a search without losing anything.</li>
+        <li><b>Stop</b> ends it and keeps every lead. <b>Continue</b> carries on later from where it stopped: areas it already finished are skipped.</li>
+        <li><b>Run again</b> (in the <b>⋯</b> menu) starts a fresh copy with the same settings. <b>Duplicate and edit</b> opens a copy in the form first.</li>
+        <li>If the server restarts, updates or crashes, running searches carry on by themselves from the areas they'd finished once it's back.</li>
+      </ul>
     </section>
 
-    <section class="card doc-section" id="leads">
-      <span class="list-kicker">Leads</span>
+    <section class="doc-section" id="leads">
       <h2>Browsing, filtering and exporting</h2>
-      <p><b>Leads</b> shows one card per search. Open one, or <b>All leads</b>, to get the table.</p>
+      <p><b>Leads</b> is one table of every lead. The <b>Search</b> filter narrows it to one or more searches; <b>Open leads</b> on any search takes you straight there.</p>
       <figure class="shot">
-        <img src="/static/docs/leads-browse.jpg" alt="The leads table with filters on the left" loading="lazy" width="1440" height="900">
-        <figcaption>Filters on the left show how many leads match each choice. The table is paged on the server, so it stays quick with millions of rows.</figcaption>
+        <img src="/static/docs/leads-browse.png" alt="The leads table with filter dropdowns above it" loading="lazy" width="1440" height="900">
+        <figcaption>Filters sit above the table, and each choice shows how many leads match. The table is paged on the server, so it stays quick with millions of rows.</figcaption>
       </figure>
       <ul>
         <li><b>Filters:</b> search, category, state, city, has phone or website, email found or not, and rating. Each shows how many leads match. Combine as many as you like.</li>
         <li><b>Search box:</b> matches name, address, phone, website and email.</li>
-        <li><b>Select rows</b> to export them, delete them, or run <b>Find emails</b> again.</li>
-        <li><b>Export</b> downloads CSV or JSON for everything that matches the filters, or writes big exports straight to disk.</li>
+        <li><b>Select rows</b>, or <b>Select all</b> to take every lead that matches, then export them, delete them, or run <b>Find emails</b> again. A delete can be undone from its notice for an hour.</li>
+        <li><b>Columns</b> picks what the table shows.</li>
+        <li><b>Export</b> downloads everything that matches the filters. <b>Download CSV</b> gives the clean layout: one row per business, readable column names, best email first, opening hours written out and a Google Maps link. <b>Choose CSV columns…</b> lets you drop columns, or switch to the <b>Outscraper format</b> (raw fields, one row per email) for tools that expect it. JSON keeps the raw Google Maps data. <b>Save CSV and JSON next to the database</b> writes big exports straight to disk.</li>
       </ul>
       <figure class="shot">
-        <img src="/static/docs/lead-detail.jpg" alt="A lead's details: contact, emails, socials and place details" loading="lazy" width="1440" height="900">
-        <figcaption>Click a lead for everything found: each email and the page it was on, socials, phones, reviews and opening hours.</figcaption>
+        <img src="/static/docs/lead-detail.png" alt="A lead's details in a side panel: contact, emails, socials and place details" loading="lazy" width="1440" height="900">
+        <figcaption>Click a lead to open everything found in a side panel: each email and the page it was on, socials, phones, reviews and opening hours. Use ↑ and ↓ to move between leads.</figcaption>
       </figure>
     </section>
 
-    <section class="card doc-section" id="emails">
-      <span class="list-kicker">Emails</span>
+    <section class="doc-section" id="emails">
       <h2>How emails are found{% if can_verify %} and checked{% endif %}</h2>
       <p>For each lead with a website, LocalLeads reads the home page, follows links that look like contact, about or team pages, and tries common paths like <code>/contact</code> if nothing turns up. It picks up:</p>
       <ul>
@@ -157,11 +155,10 @@
       {% endif %}
     </section>
 
-    <section class="card doc-section" id="proxies">
-      <span class="list-kicker">Proxies</span>
+    <section class="doc-section" id="proxies">
       <h2>Proxies for bigger searches</h2>
       <figure class="shot">
-        <img src="/static/docs/proxies.jpg" alt="The proxies page with health checks and groups" loading="lazy" width="1440" height="900">
+        <img src="/static/docs/proxies.png" alt="The proxies page with health checks and groups" loading="lazy" width="1440" height="900">
         <figcaption>Add, check and group proxies. Searches only use the healthy ones.</figcaption>
       </figure>
       <p>Google limits how fast one connection can search. Proxies spread the lookups out, so you can run many more at once. Paste them one per line:</p>
@@ -179,43 +176,46 @@ host:3128</code></pre>
       </ul>
     </section>
 
-    <section class="card doc-section" id="mcp">
-      <span class="list-kicker">AI agents (MCP)</span>
+    <section class="doc-section" id="mcp">
       <h2>Run LocalLeads from Claude, Codex, Cursor and more</h2>
-      <p>LocalLeads includes an MCP server, so an AI agent can start searches, check progress, filter leads and export them in plain language. The <a href="/agents">MCP page</a> has the exact setup for each agent, with your paths filled in.</p>
+      <p>LocalLeads includes an MCP server, so an AI agent can start searches, check progress, filter leads and export them in plain language. The <a href="/agents">Agents page</a> has the exact setup for each agent, with your paths filled in.</p>
       <figure class="shot">
-        <img src="/static/docs/mcp.jpg" alt="The MCP page with setup steps for each agent" loading="lazy" width="1440" height="900">
-        <figcaption>Pick your agent, copy one command or config block, and restart the agent.</figcaption>
+        <img src="/static/docs/mcp.png" alt="The Agents page: API keys, then the setup for each agent" loading="lazy" width="1440" height="900">
+        <figcaption>Create a key, copy one command or config block for your agent, and restart it.</figcaption>
       </figure>
-      <p>Agents need an <b>API key</b>. Create one under <a href="/agents#keys">API keys</a> on the MCP page (one per agent or machine is easiest) and copy it straight away: it's shown only once. The setup snippets on that page fill the new key in for you. Agents that launch LocalLeads pass it in the <code>LOCALLEADS_API_KEY</code> environment variable; agents that connect over HTTP send it as <code>Authorization: Bearer &lt;key&gt;</code>. Revoke a key there and agents using it stop working at once.</p>
+      <p>Agents need an <b>API key</b>. Create one under <a href="/agents#keys">API keys</a> on the Agents page (one per agent or machine is easiest) and copy it straight away: it's shown only once. The setup snippets on that page fill the new key in for you. Agents that launch LocalLeads pass it in the <code>LOCALLEADS_API_KEY</code> environment variable; agents that connect over HTTP send it as <code>Authorization: Bearer &lt;key&gt;</code>. Revoke a key there and agents using it stop working at once.</p>
       <p>The quickest way sets up Claude Code, Codex and Cursor in one go, with a new key:</p>
       <div class="snippet">
         <div class="snippet-head"><span>Run in a terminal</span><button type="button" class="btn sm" data-copy>Copy</button></div>
         <pre><code>{{ install }}</code></pre>
       </div>
-      <p>Then ask, for example: <i>"Find 300 dentists in Denver with emails and export them to CSV."</i></p>
+      <p>Then ask, for example: <i>"Find 300 dentists in Denver with emails and export them to CSV."</i> Agents get every tool the dashboard has, {{ tool_count }} in all: searches and categories, leads and exports, proxies and groups, backups, the server log, and undoing a delete.</p>
     </section>
 
-    <section class="card doc-section" id="backups">
-      <span class="list-kicker">Backups</span>
+    <section class="doc-section" id="backups">
       <h2>Your data and backups</h2>
       <figure class="shot">
-        <img src="/static/docs/settings.jpg" alt="Settings: database location, backups and activity" loading="lazy" width="1440" height="900">
-        <figcaption>Settings shows where the database lives and makes a backup in one click.</figcaption>
+        <img src="/static/docs/settings.png" alt="Settings: account, password, backups and storage" loading="lazy" width="1440" height="900">
+        <figcaption>Settings has your account, a one-click backup, and where the database lives.</figcaption>
       </figure>
       <p>Everything (searches, leads and proxy credentials) is in one SQLite file. <b>Download a backup</b> takes a consistent copy even while searches run. To restore, stop the server and start it with <code>--restore /path/to/backup.sqlite</code>. Keep the file private, because it holds your proxy logins.</p>
     </section>
 
+    <section class="doc-section" id="system">
+      <h2>Server log and updates</h2>
+      <p><b>System</b> shows the server's own log since it started: searches, proxy checks, website reading, warnings and errors, live as they happen. Filter it by level, search it, or download it to share when something goes wrong.</p>
+      <p>LocalLeads checks GitHub for new versions once in a while. When one is out, an <b>Update and restart</b> card appears in the sidebar: it downloads the release, checks it against the release's checksums, backs up your database and restarts. Running searches pause for a few seconds and carry on afterwards. <b>Check for updates</b> in the Account menu looks right away. Start the server with <code>LOCALLEADS_UPDATES=off</code> to turn checks off.</p>
+    </section>
+
     <section class="card doc-section faq" id="help">
-      <span class="list-kicker">Troubleshooting</span>
       <h2>Common questions</h2>
       <details>
         <summary>I don't see any emails yet</summary>
-        <p>Emails come from websites, so leads without a website never get one. Reading starts a few seconds after leads come in, and the <b>with email</b> count in the progress line goes up as sites are read. About half of local businesses publish an email on their site.</p>
+        <p>Emails come from websites, so leads without a website never get one. Websites are read once Google Maps is done, and the <b>with an email</b> count under <b>Websites</b> goes up as sites are read. About half of local businesses publish an email on their site.</p>
       </details>
       <details>
         <summary>Google stopped returning results or the search got slow</summary>
-        <p>Google is limiting your connection. Lower <b>Requests at once</b> to about 10, or add proxies and pick their group in the search.</p>
+        <p>Google is limiting your connection. Stop the search, lower <b>Requests at once</b> to about 10 (or add proxies), and use <b>Continue</b> to carry on where it stopped.</p>
       </details>
       <details>
         <summary>So many "repeats skipped". Is that normal?</summary>
@@ -232,20 +232,24 @@ host:3128</code></pre>
       </details>
       {% endif %}
       <details>
+        <summary>I deleted something by mistake</summary>
+        <p>Deleted searches, leads, proxies and groups are kept for an hour. Click <b>Undo</b> on the notice that appeared, or ask your agent to undo it.</p>
+      </details>
+      <details>
         <summary>"Address already in use" when starting</summary>
         <p>Another copy is already running on port 7878. Open <code>http://127.0.0.1:7878</code>, or stop it first, or start this one with <code>--bind 127.0.0.1:7879</code>.</p>
       </details>
       <details>
         <summary>My agent can't connect over MCP</summary>
-        <p>Restart the agent after adding the config, and check that the command on the <a href="/agents">MCP page</a> still exists. Over HTTP, the dashboard has to be running.</p>
+        <p>Restart the agent after adding the config, and check that the command on the <a href="/agents">Agents page</a> still exists. Over HTTP, the app has to be running.</p>
       </details>
       <details>
         <summary>My agent says "needs an API key" or "invalid or revoked API key"</summary>
-        <p>The agent's config has no key, or one that was revoked or mistyped. Create a new key on the <a href="/agents#keys">MCP page</a> and put it in the agent's config (<code>LOCALLEADS_API_KEY</code> for a command, the <code>Authorization</code> header over HTTP), then restart the agent.</p>
+        <p>The agent's config has no key, or one that was revoked or mistyped. Create a new key on the <a href="/agents#keys">Agents page</a> and put it in the agent's config (<code>LOCALLEADS_API_KEY</code> for a command, the <code>Authorization</code> header over HTTP), then restart the agent.</p>
       </details>
       <details>
         <summary>I forgot my password</summary>
-        <p>There's no reset. Your leads are still in the database file, but the dashboard needs the password. Start with a new database (<code>--db new.sqlite</code>), or restore a backup from before the password changed.</p>
+        <p>There's no reset. Your leads are still in the database file, but the app needs the password. Start with a new database (<code>--db new.sqlite</code>), or restore a backup from before the password changed.</p>
       </details>
     </section>
   </article>

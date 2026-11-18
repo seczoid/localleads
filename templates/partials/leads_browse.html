@@ -1,67 +1,98 @@
-<aside id="facets" class="facets" aria-label="Filters" :class="{ open: filtersOpen }">
+<div id="facets" class="facet-bar">
   {% for group in groups %}
   {% if !group.options.is_empty() %}
-  <fieldset class="facet" x-data="{ more: false }">
-    <legend>{{ group.title }}</legend>
-    {% for option in group.options %}
-    <label class="facet-option{% if option.checked %} on{% endif %}"{% if option.extra %} x-show="more" x-cloak{% endif %}>
-      <input type="checkbox" name="{{ group.param }}" value="{{ option.value }}" {% if option.checked %}checked{% endif %}>
-      <span class="facet-label" title="{{ option.label }}">{{ option.label }}</span>
-      <span class="facet-count">{{ option.count }}</span>
-    </label>
-    {% endfor %}
-    {% if group.extra > 0 %}
-    <button type="button" class="facet-more" @click="more = !more" x-text="more ? 'Show fewer' : 'Show {{ group.extra }} more'">Show {{ group.extra }} more</button>
-    {% endif %}
-  </fieldset>
+  <div class="fdrop" @click.outside="$store.facets.open === '{{ group.param }}' && ($store.facets.open = '')">
+    <button type="button" class="fdrop-btn{% if group.selected > 0 %} on{% endif %}" @click="$store.facets.toggle('{{ group.param }}')" :aria-expanded="$store.facets.open === '{{ group.param }}'">
+      {{ group.title }}{% if group.selected > 0 %}<span class="fdrop-n">{{ group.selected }}</span>{% endif %}
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+    </button>
+    <div class="fdrop-panel" x-show="$store.facets.open === '{{ group.param }}'" x-cloak>
+      {% if group.options.len() > 8 %}
+      <input type="search" class="fdrop-find" placeholder="{{ group.find }}" aria-label="{{ group.find }}" autocomplete="off"
+             x-model="$store.facets.q['{{ group.param }}']" @change.stop @input.stop @keydown.enter.prevent>
+      {% endif %}
+      <div class="fdrop-list">
+        {% for option in group.options %}
+        <label class="facet-option{% if option.checked %} on{% endif %}" data-key="{{ option.key }}"
+               x-show="!$store.facets.q['{{ group.param }}'] || $el.dataset.key.includes($store.facets.q['{{ group.param }}'].toLowerCase())">
+          <input type="checkbox" name="{{ group.param }}" value="{{ option.value }}" {% if option.checked %}checked{% endif %}>
+          <span class="facet-label" title="{{ option.label }}">{{ option.label }}</span>
+          <span class="facet-count">{{ option.count }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
   {% endif %}
   {% endfor %}
 
-  <fieldset class="facet">
-    <legend>Contact</legend>
-    <label class="facet-option{% if has_phone %} on{% endif %}">
-      <input type="checkbox" name="has_phone" value="1" {% if has_phone %}checked{% endif %}>
-      <span class="facet-label">Has phone</span>
-      <span class="facet-count">{{ phone_count }}</span>
-    </label>
-    {% for option in website %}
-    <label class="facet-option{% if option.checked %} on{% endif %}">
-      <input type="radio" name="website" value="{{ option.value }}" {% if option.checked %}checked{% endif %}>
-      <span class="facet-label">{{ option.label }}</span>
-      <span class="facet-count">{{ option.count }}</span>
-    </label>
-    {% endfor %}
-  </fieldset>
+  <div class="fdrop" @click.outside="$store.facets.open === 'contact' && ($store.facets.open = '')">
+    <button type="button" class="fdrop-btn{% if has_phone %} on{% endif %}{% for option in website %}{% if option.checked && !option.value.is_empty() %} on{% endif %}{% endfor %}" @click="$store.facets.toggle('contact')" :aria-expanded="$store.facets.open === 'contact'">
+      Phone &amp; website
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+    </button>
+    <div class="fdrop-panel" x-show="$store.facets.open === 'contact'" x-cloak>
+      <div class="fdrop-list">
+        <label class="facet-option{% if has_phone %} on{% endif %}">
+          <input type="checkbox" name="has_phone" value="1" {% if has_phone %}checked{% endif %}>
+          <span class="facet-label">Has phone</span>
+          <span class="facet-count">{{ phone_count }}</span>
+        </label>
+        <div class="fdrop-sep">Website</div>
+        {% for option in website %}
+        <label class="facet-option{% if option.checked %} on{% endif %}">
+          <input type="radio" name="website" value="{{ option.value }}" {% if option.checked %}checked{% endif %}>
+          <span class="facet-label">{{ option.label }}</span>
+          <span class="facet-count">{{ option.count }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
 
-  <fieldset class="facet">
-    <legend>Email</legend>
-    {% for option in email %}
-    <label class="facet-option{% if option.checked %} on{% endif %}">
-      <input type="radio" name="email" value="{{ option.value }}" {% if option.checked %}checked{% endif %}>
-      <span class="facet-label">{{ option.label }}</span>
-      <span class="facet-count">{{ option.count }}</span>
-    </label>
-    {% endfor %}
-  </fieldset>
+  <div class="fdrop" @click.outside="$store.facets.open === 'email' && ($store.facets.open = '')">
+    <button type="button" class="fdrop-btn{% for option in email %}{% if option.checked && !option.value.is_empty() %} on{% endif %}{% endfor %}" @click="$store.facets.toggle('email')" :aria-expanded="$store.facets.open === 'email'">
+      Email{% for option in email %}{% if option.checked && !option.value.is_empty() %}: {{ option.label|lower }}{% endif %}{% endfor %}
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+    </button>
+    <div class="fdrop-panel" x-show="$store.facets.open === 'email'" x-cloak>
+      <div class="fdrop-list">
+        {% for option in email %}
+        <label class="facet-option{% if option.checked %} on{% endif %}">
+          <input type="radio" name="email" value="{{ option.value }}" {% if option.checked %}checked{% endif %}>
+          <span class="facet-label">{{ option.label }}</span>
+          <span class="facet-count">{{ option.count }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
 
-  <fieldset class="facet">
-    <legend>Rating</legend>
-    {% for option in rating %}
-    <label class="facet-option{% if option.checked %} on{% endif %}">
-      <input type="radio" name="min_rating" value="{{ option.value }}" {% if option.checked %}checked{% endif %}>
-      <span class="facet-label">{% if !option.value.is_empty() %}★ {% endif %}{{ option.label }}</span>
-      <span class="facet-count">{{ option.count }}</span>
-    </label>
-    {% endfor %}
-  </fieldset>
-</aside>
+  <div class="fdrop" @click.outside="$store.facets.open === 'rating' && ($store.facets.open = '')">
+    <button type="button" class="fdrop-btn{% for option in rating %}{% if option.checked && !option.value.is_empty() %} on{% endif %}{% endfor %}" @click="$store.facets.toggle('rating')" :aria-expanded="$store.facets.open === 'rating'">
+      Rating{% for option in rating %}{% if option.checked && !option.value.is_empty() %}: ★ {{ option.value }}+{% endif %}{% endfor %}
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+    </button>
+    <div class="fdrop-panel" x-show="$store.facets.open === 'rating'" x-cloak>
+      <div class="fdrop-list">
+        {% for option in rating %}
+        <label class="facet-option{% if option.checked %} on{% endif %}">
+          <input type="radio" name="min_rating" value="{{ option.value }}" {% if option.checked %}checked{% endif %}>
+          <span class="facet-label">{% if !option.value.is_empty() %}★ {% endif %}{{ option.label }}</span>
+          <span class="facet-count">{{ option.count }}</span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
 
 <header id="results-head" class="results-head"{% if oob %} hx-swap-oob="true"{% endif %}>
-  <div class="results-count"><b>{{ total }}</b> {% if total == "1" %}lead{% else %}leads{% endif %}</div>
+  <div class="results-count"><b>{{ total }}</b> {% if total == "1" %}lead{% else %}leads{% endif %}{% if filtered %} match{% endif %}</div>
   {% if filtered %}
   <div class="active-filters">
-    {% for chip in chips %}<a class="filter-chip" href="{{ chip.href }}" aria-label="Remove filter {{ chip.label }}">{{ chip.label }}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg></a>{% endfor %}
-    <a class="link quiet small" href="/leads/browse">Clear all</a>
+    {% for chip in chips %}<a class="filter-chip" href="{{ chip.href }}" aria-label="Remove filter {{ chip.label }}">{{ chip.label }}<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></a>{% endfor %}
+    <a class="link quiet small" href="/leads">Clear all</a>
   </div>
   {% endif %}
 </header>

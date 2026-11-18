@@ -1,46 +1,146 @@
 {% extends "base.html" %}
 {% block title %}New search{% endblock %}
-{% block heading %}<h1>New search</h1>{% if !from_name.is_empty() %}<span class="muted">based on “{{ from_name }}”</span>{% endif %}{% endblock %}
+{% block heading %}<h1>New search</h1>{% endblock %}
+{% block sub %}<p class="page-sub">{% if !from_name.is_empty() %}A copy of “{{ from_name }}”. Change what you need, then start it.{% else %}Leads are saved as they're found, so you can stop any time and keep what's collected.{% endif %}</p>{% endblock %}
 {% block content %}
 <form class="job-form" id="job-form" hx-post="/jobs" hx-disabled-elt="#job-submit"
       x-data="jobForm({{ filters_json }}, {{ collect_all }})"
       @htmx:response-error="error = $event.detail.xhr.responseText" @htmx:before-request="if ($event.target.id === 'job-form') error = ''">
   <div class="form-main">
-    <section class="card">
-      <header class="card-head"><h2>What are you looking for?</h2></header>
-      <label class="field">
-        <span>Business types or keywords <em>one per line</em></span>
-        <textarea name="queries" rows="3" required placeholder="hvac&#10;plumber&#10;roofing contractor">{{ form.queries }}</textarea>
-      </label>
+    <section class="step">
+      <header class="step-head"><span class="step-n" aria-hidden="true">1</span><h2>What are you looking for?</h2></header>
+      <div class="field cat-field" x-data="categoryPicker('{{ crate::categories::url() }}')"
+           @keydown.escape="if (open) { $event.stopPropagation(); close(); }" @click.outside="close()" @focusout="leave($event)">
+        <label for="cat-input">Business types or keywords</label>
+        <textarea name="queries" x-ref="value" hidden>{{ form.queries }}</textarea>
+        <div class="cat-box" :class="{ open }" @click.self="focusInput()">
+          <template x-for="(q, i) in shownChips()" :key="q">
+            <span class="cat-chip" :class="{ own: !known(q) }" :title="known(q) ? 'Google Maps category' : 'Your own search text'">
+              <span x-text="pretty(q)"></span>
+              <button type="button" @click.stop="remove(q)" :aria-label="'Remove ' + q"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
+            </span>
+          </template>
+          <button type="button" class="cat-more" x-show="hiddenCount() > 0" x-cloak @click.stop="expanded = true" x-text="'+' + hiddenCount().toLocaleString() + ' more'"></button>
+          <input id="cat-input" class="cat-input" x-ref="input" type="text" autocomplete="off" spellcheck="false"
+                 x-model="q" @focus="show()" @click="show()" @input.stop="q = $event.target.value; typed()" @change.stop @paste="paste($event)"
+                 @keydown.down.prevent="move(1)" @keydown.up.prevent="move(-1)" @keydown.enter.prevent="enter()"
+                 @keydown.tab="tabAway($event)" @keydown.backspace="backspace($event)" @keydown="comma($event)"
+                 :placeholder="picked.length ? 'Add another…' : 'Start typing: dentist, roofing contractor, cafe…'"
+                 role="combobox" aria-autocomplete="list" aria-controls="cat-list" :aria-expanded="open" :aria-activedescendant="activeId()">
+        </div>
+
+        <div class="menu cat-menu" x-show="open" x-cloak x-transition.opacity.duration.120ms>
+          <div class="cat-tabs" role="tablist">
+            <button type="button" role="tab" :aria-selected="tab === 'categories'" @mousedown.prevent @click="setTab('categories')">Categories</button>
+            <button type="button" role="tab" :aria-selected="tab === 'groups'" @mousedown.prevent @click="setTab('groups')">Groups</button>
+          </div>
+
+          <template x-if="tab === 'groups' && group">
+            <div class="cat-group-head">
+              <button type="button" class="cat-back" @mousedown.prevent @click="group = null; active = 0" aria-label="All groups"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-left"/></svg></button>
+              <strong x-text="group.label"></strong>
+              <span class="muted small" x-text="groupPicked(group) + ' of ' + group.items.length.toLocaleString() + ' selected'"></span>
+              <button type="button" class="btn sm" @mousedown.prevent @click="toggleGroup(group)" x-text="groupPicked(group) === group.items.length ? 'Clear group' : 'Select all ' + group.items.length.toLocaleString()"></button>
+            </div>
+          </template>
+
+          <ul class="cat-list" id="cat-list" role="listbox" aria-multiselectable="true" x-ref="list">
+            <template x-if="custom()">
+              <li role="option" id="cat-opt-own" class="cat-own" :class="{ active: active === -1 }" :aria-selected="false"
+                  @mousedown.prevent @click="add(q.trim()); q = ''; active = 0" @mousemove="active = -1">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-add"/></svg>
+                <span>Search for “<strong x-text="q.trim()"></strong>” as typed</span>
+                <kbd x-show="!rows().length">Enter</kbd>
+              </li>
+            </template>
+            <template x-for="(row, i) in rows()" :key="row.key">
+              <li role="option" :id="'cat-opt-' + i" :class="{ active: active === i, on: row.on }" :aria-selected="row.on"
+                  @mousedown.prevent @click="choose(row)" @mousemove="active = i">
+                <span class="cat-check" aria-hidden="true" x-show="!row.group"><svg class="icon" viewBox="0 0 24 24"><use href="#i-check"/></svg></span>
+                <span class="cat-label" x-html="row.html"></span>
+                <span class="cat-meta" x-text="row.meta"></span>
+                <svg class="icon cat-chevron" x-show="row.group" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-right"/></svg>
+              </li>
+            </template>
+            <li class="cat-empty muted small" x-show="!ready && !failed">Loading categories…</li>
+            <li class="cat-empty muted small" x-show="failed && !custom()">Couldn't load the category list. Type a business type and press Enter.</li>
+            <li class="cat-empty muted small" x-show="ready && !rows().length && !custom()" x-text="tab === 'groups' ? 'No group matches.' : 'Type to search, or browse Groups.'"></li>
+          </ul>
+
+          <div class="cat-foot">
+            <span class="muted small" x-text="picked.length ? picked.length.toLocaleString() + ' selected' : 'Nothing selected yet'"></span>
+            <span class="cat-keys muted small" x-show="q.trim()">Enter adds · Esc closes</span>
+            <button type="button" class="cat-clear" x-show="picked.length" @mousedown.prevent @click="clearAll()">Clear all</button>
+          </div>
+        </div>
+      </div>
+      <p class="hint">Pick Google Maps categories, or type anything and press Enter to search for it as written. Each one is looked up in every place you pick.</p>
     </section>
 
-    <section class="card">
-      <header class="card-head"><h2>Where?</h2></header>
+    <section class="step">
+      <header class="step-head"><span class="step-n" aria-hidden="true">2</span><h2>Where?</h2></header>
       <div class="region-picker" x-data="regionPicker({{ picker }}, {% if form.location_mode == "custom" %}true{% else %}false{% endif %})">
-        <div class="picker-top">
-          <select name="location_country" x-model="country" @change="loadCountry()" :disabled="custom" aria-label="Country">
-            {% for opt in countries %}<option value="{{ opt.value }}" {% if opt.selected %}selected{% endif %}>{{ opt.label }}</option>{% endfor %}
-          </select>
-          <div class="picker-box" :class="custom && 'disabled'" @click="$refs.search.focus()">
+        <div class="picker-summary" x-show="!custom">
+          <div class="country-pick" @keydown.escape.stop="closeCountries()" @click.outside="closeCountries()">
+            <input type="hidden" name="location_country" :value="country" value="{{ form.location_country }}">
+            <button type="button" class="country-btn" x-ref="countryBtn" @click="openCountries()" :disabled="custom" aria-haspopup="listbox" :aria-expanded="countryOpen" aria-label="Country">
+              <span class="country-iso" x-text="isoOf(country)"></span>
+              <span class="country-name" x-text="country">{{ form.location_country }}</span>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg>
+            </button>
+            <div class="menu country-menu" x-show="countryOpen" x-cloak x-transition.opacity.duration.120ms>
+              <input type="search" class="country-search" x-ref="countrySearch" x-model="countryQ" @input="countryActive = 0"
+                     @keydown.down.prevent="moveCountry(1)" @keydown.up.prevent="moveCountry(-1)" @keydown.enter.prevent="pickActiveCountry()"
+                     placeholder="Search countries…" aria-label="Search countries" role="combobox" aria-controls="country-list" :aria-activedescendant="'country-' + countryActive">
+              <ul class="country-list" id="country-list" role="listbox" x-ref="countryList">
+                <template x-for="(c, i) in countryMatches()" :key="c[1]">
+                  <li role="option" :id="'country-' + i" :aria-selected="c[0] === country" :class="{ active: i === countryActive, on: c[0] === country }"
+                      @click="pickCountry(c[0])" @mousemove="countryActive = i">
+                    <span class="country-iso" x-text="c[1]"></span><span x-text="c[0]"></span>
+                  </li>
+                </template>
+                <li class="muted small country-none" x-show="!countryMatches().length">No country matches</li>
+              </ul>
+            </div>
+          </div>
+          <div class="picker-choice">
+            <b x-text="choiceText()"></b>
+            <span class="muted small" x-text="choiceDetail()"></span>
+          </div>
+          <button type="button" class="btn sm" @click="editing = !editing; editing && $nextTick(() => $refs.search.focus())" :aria-expanded="editing" x-text="editing ? 'Done' : 'Change places'">Change places</button>
+        </div>
+        <div class="picker-depth" x-show="!custom && expandable" x-cloak>
+          <span class="muted small">Split into</span>
+          <div class="segmented compact" role="radiogroup" aria-label="Split into">
+            <template x-for="d in depthOptions()" :key="d.value">
+              <button type="button" role="radio" :aria-checked="depth === d.value" :aria-pressed="depth === d.value" @click="setDepth(d.value)">
+                <span x-text="d.label"></span><span class="depth-count" x-show="d.count" x-text="d.count"></span>
+              </button>
+            </template>
+          </div>
+          <span class="muted small depth-note" x-text="depthNote()"></span>
+          <input type="hidden" name="depth" :value="depth">
+        </div>
+        <div class="picker-edit" x-show="editing && !custom" x-cloak>
+          <div class="picker-box" @click="$refs.search.focus()">
             <template x-for="chip in chips()" :key="chip.key">
               <span class="filter-chip">
                 <span x-text="chip.label"></span>
-                <button type="button" x-show="chip.removable" @click.stop="chip.remove()" :aria-label="'Remove ' + chip.label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg></button>
+                <button type="button" x-show="chip.removable" @click.stop="chip.remove()" :aria-label="'Remove ' + chip.label"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
               </span>
             </template>
             <input type="search" x-ref="search" class="picker-search" x-model="q" @input.debounce.250ms="search()" @keydown.enter.prevent
-                   :placeholder="expandable ? 'Search states and cities…' : 'Search states…'" :disabled="custom" aria-label="Search places">
+                   :placeholder="expandable ? `Search ${unit()} and cities…` : `Search ${unit()}…`" :disabled="custom" aria-label="Search places">
           </div>
-        </div>
 
-        <div class="picker-panel" x-show="!custom">
+        <div class="picker-panel">
           <div class="picker-results" x-show="results.length" x-cloak>
             <div class="picker-label">Cities</div>
             <template x-for="c in results" :key="c.label">
               <label class="check picker-row"><input type="checkbox" :checked="cityPicked(stateOf(c), c)" @change="toggleCity(stateOf(c), c)">
                 <span x-text="c.name + ', ' + c.state"></span><span class="muted small" x-text="zipText(c)"></span></label>
             </template>
-            <div class="picker-label">States</div>
+            <div class="picker-label" x-text="unit()"></div>
           </div>
           <ul class="picker-tree">
             <template x-for="s in visibleStates()" :key="s.name">
@@ -49,6 +149,7 @@
                   <button type="button" class="picker-toggle" x-show="expandable" @click="expand(s)" :aria-label="(s.open ? 'Hide' : 'Show') + ' cities in ' + s.name" x-text="s.open ? '−' : '+'"></button>
                   <label class="check"><input type="checkbox" :checked="s.full" x-effect="$el.indeterminate = !s.full && s.picked.size > 0" @change="toggleState(s)"><span x-text="s.name"></span></label>
                   <span class="muted small" x-show="!s.full && s.picked.size" x-text="s.picked.size + (s.picked.size === 1 ? ' city' : ' cities')"></span>
+                  <span class="muted small picker-count" x-text="stateText(s)"></span>
                 </div>
                 <ul class="picker-cities" x-show="s.open">
                   <li class="muted small" x-show="s.loading">Loading cities…</li>
@@ -66,8 +167,9 @@
             <span class="muted small" x-text="summary()"></span>
           </div>
         </div>
+        </div>
 
-        <label class="check"><input type="checkbox" x-model="custom" @change="changed()"> Custom places instead</label>
+        <label class="check"><input type="checkbox" x-model="custom" @change="changed()"> Type places myself instead (cities, ZIP codes, neighborhoods)</label>
         <label class="field" x-show="custom" x-cloak>
           <span>Places <em>one per line: cities, ZIP codes, neighborhoods, or coordinates</em></span>
           <textarea name="custom_locations" rows="4" placeholder="Austin, TX&#10;Brooklyn, New York&#10;10001">{{ form.custom_locations }}</textarea>
@@ -80,28 +182,30 @@
             <template x-for="label in pickedCities()" :key="label"><input type="hidden" name="cities" :value="label"></template>
           </div>
         </template>
-        <p class="hint" x-show="!custom">Every selected area is searched ZIP code by ZIP code, busiest areas first, so you get as many results as Google Maps has. Cities and ZIP codes are available for the United States; other countries are searched state by state.</p>
+        <p class="hint" x-show="!custom">Google Maps shows at most about 120 results per lookup, so each area is split into small pieces and searched busiest first. Postal codes find the most leads; towns and whole regions are quicker. You can also pick single cities.</p>
       </div>
     </section>
 
-    <section class="card">
-      <header class="card-head"><h2>How many leads?</h2></header>
-      <div class="row-2">
-        <label class="field" :class="collectAll && 'disabled'"><span>Maximum results</span><input type="number" min="1" max="10000000" name="total_limit" value="{{ form.total_limit }}" :disabled="collectAll"></label>
-        <label class="check end"><input type="checkbox" name="collect_all" x-model="collectAll"> No limit: get everything available</label>
+    <section class="step">
+      <header class="step-head"><span class="step-n" aria-hidden="true">3</span><h2>How many leads?</h2></header>
+      <div class="limit-row">
+        <label class="field" :class="collectAll && 'disabled'"><span>Stop after</span><input type="number" min="1" max="10000000" name="total_limit" value="{{ form.total_limit }}" :disabled="collectAll" inputmode="numeric"></label>
+        <label class="check"><input type="checkbox" name="collect_all" x-model="collectAll"> No limit: get everything Google Maps has</label>
       </div>
     </section>
 
-    <section class="card">
-      <header class="card-head"><h2>Enrich each lead</h2></header>
+    <section class="step">
+      <header class="step-head"><span class="step-n" aria-hidden="true">4</span><h2>Extras</h2></header>
+      <fieldset class="field-group">
+      <legend>For each lead</legend>
       <label class="check"><input type="checkbox" name="find_emails" {% if form.find_emails.is_some() %}checked{% endif %}> Find emails on the lead's website, plus socials, phones and site details</label>
       <label class="check"><input type="checkbox" name="place_details" {% if form.place_details.is_some() %}checked{% endif %}> Open the Google place page: reviews per star, review topics, owner, photos</label>
       {% if can_verify %}<label class="check"><input type="checkbox" name="verify_emails" {% if form.verify_emails.is_some() %}checked{% endif %}> Verify emails with their mail servers (slower; found emails show up first either way)</label>{% endif %}
-      <p class="hint">Runs alongside the search, with no AI: pages are read and addresses pulled out by fixed rules. Websites are read directly; Google goes through the search's proxies.</p>
-    </section>
+      <p class="hint">Runs alongside the search. Websites are read directly; Google goes through the search's proxies.</p>
+      </fieldset>
 
-    <section class="card">
-      <header class="card-head"><h2>Proxies</h2></header>
+      <fieldset class="field-group">
+      <legend>Speed and proxies</legend>
       <div class="row-2">
         <label class="field">
           <span>Proxy group</span>
@@ -109,11 +213,11 @@
         </label>
         <label class="field"><span>Requests at once <em>1–{{ max_concurrency }}</em></span><input type="number" min="1" max="{{ max_concurrency }}" name="concurrency" value="{{ form.concurrency }}"></label>
       </div>
-      <p class="hint">Requests rotate through the group's healthy proxies, including ones added while the search runs. Without proxies, keep it around 10 so Google doesn't start refusing requests; with a few hundred proxies, 100–300 is much faster.</p>
-    </section>
+      <p class="hint">Without proxies, keep it around 10 so Google doesn't start refusing requests. With a few hundred healthy proxies, 100–300 at a time is much faster.</p>
+      </fieldset>
 
-    <details class="card">
-      <summary class="card-head"><h2>Advanced</h2><span class="muted small">Name, filters, language, retries, output</span></summary>
+    <details class="disclosure advanced">
+      <summary>Advanced: name, filters, language, retries, output</summary>
       <label class="field">
         <span>Search name</span>
         <input name="job_name" value="{{ form.job_name }}" maxlength="200" placeholder="Named automatically, e.g. “Hvac in New York”">
@@ -148,7 +252,7 @@
             </select>
             <input x-model="f.value" placeholder="value" :disabled="f.op === 'is_empty' || f.op === 'not_empty'">
             <input type="hidden" name="filters" :value="serialize(f)">
-            <button type="button" class="icon-btn" @click="filters.splice(i, 1); $nextTick(() => $el.closest('form').dispatchEvent(new Event('change', { bubbles: true })))" aria-label="Remove filter"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"/></svg></button>
+            <button type="button" class="icon-btn" @click="filters.splice(i, 1); $nextTick(() => $el.closest('form').dispatchEvent(new Event('change', { bubbles: true })))" aria-label="Remove filter"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
           </div>
         </template>
         <div><button type="button" class="btn sm" @click="addFilter()">Add filter</button></div>
@@ -161,7 +265,7 @@
           <label class="chip"><input type="checkbox" name="output_fields" value="{{ field.value }}" {% if field.checked %}checked{% endif %}><span>{{ field.value }}</span></label>
           {% endfor %}
         </div>
-        <p class="hint">CSV exports always use the full 120-column schema; this list is stored with the search.</p>
+        <p class="hint">Kept with the search for your records. Downloads use the clean CSV layout; choose its columns, or the full Outscraper format, when you export.</p>
       </div>
       <label class="field">
         <span>Enrichments <em>separated by |</em></span>
@@ -172,17 +276,18 @@
         <input name="tags" value="{{ form.tags }}" placeholder="q4-outreach, hvac">
       </label>
     </details>
+    </section>
   </div>
 
   <aside class="form-side">
-    <div class="card sticky">
-      <header class="card-head"><h2>Summary</h2></header>
+    <div class="plan-card sticky">
+      <h2>This search</h2>
       <div id="job-preview" hx-post="/jobs/preview" hx-trigger="load, change from:#job-form, input from:#job-form delay:500ms" hx-include="#job-form">
         <p class="muted">Calculating…</p>
       </div>
       <div class="callout bad" x-show="error" x-text="error" x-cloak></div>
       <button type="submit" id="job-submit" class="btn primary block lg">Start search</button>
-      <p class="hint">Leads are saved as they arrive, so stopping a search keeps everything collected so far.</p>
+      <p class="hint">You can watch it, pause it or stop it from Searches.</p>
     </div>
   </aside>
 </form>

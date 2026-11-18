@@ -16,6 +16,7 @@ services:
       LOCALLEADS_PUBLIC_URL: ${PUBLIC_URL:-https://${DOMAIN:?Set DOMAIN in .env}}
       LOCALLEADS_BEHIND_PROXY: "true"
       LOCALLEADS_SETUP_CODE: ${LOCALLEADS_SETUP_CODE:-}
+      LOCALLEADS_UPDATES: ${LOCALLEADS_UPDATES:-on}
     volumes:
       - localleads-data:/data
     # Reachable only through Caddy, never published directly.
@@ -25,7 +26,7 @@ services:
       nofile:
         soft: 65536
         hard: 65536
-    # Lets running searches stop cleanly; they resume as "interrupted".
+    # Running searches carry on where they were after a restart.
     stop_grace_period: 30s
     logging:
       driver: json-file

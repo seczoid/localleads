@@ -2,7 +2,7 @@ use super::table::{TablePage, TableParams};
 use super::views::{
     CheckerView, GroupView, HealthBar, ProgressView, ProxyCheckView, ProxyView, fmt_count,
 };
-use super::{AppError, RenderHtml, WebResult, flag, notify, redirect, render};
+use super::{AppError, RenderHtml, WebResult, flag, notify, notify_with_undo, redirect, render};
 use crate::app::{CheckerSettings, SharedState};
 use crate::db::ProxyQuery;
 use crate::proxy::{import_proxy_text, normalize_protocol};
@@ -139,6 +139,32 @@ struct ProxiesPage {
     progress: String,
     checker: CheckerView,
     all_groups: Vec<GroupView>,
+    offer: ProxyOffer,
+}
+
+/// The "where to get proxies" card on the Proxies page.
+struct ProxyOffer {
+    /// "empty" (no proxies yet), "failing" (most checked proxies fail) or
+    /// "more" (a quiet, dismissible strip).
+    kind: &'static str,
+    failed: i64,
+    checked: i64,
+    url: &'static str,
+}
+
+impl ProxyOffer {
+    fn new(health: &HealthBar) -> Self {
+        let checked = health.healthy + health.slow + health.failed;
+        let total = checked + health.unknown;
+        let kind = if total == 0 {
+            "empty"
+        } else if checked >= 5 && health.failed * 2 > checked {
+            "failing"
+        } else {
+            "more"
+        };
+        Self { kind, failed: health.failed, checked, url: super::PROXYSCRAPE_URL }
+    }
 }
 
 pub async fn page(
@@ -165,6 +191,7 @@ pub async fn page(
         tabs: tabs.render_html()?,
         filters,
         all_groups,
+        offer: ProxyOffer::new(&HealthBar::new(&state.db.proxy_status_counts(None)?)),
     })
 }
 
@@ -373,6 +400,7 @@ pub async fn bulk(State(state): State<SharedState>, Form(form): Form<BulkForm>) 
         return Err(AppError::bad_request("No proxies match this selection"));
     }
     let count = ids.len();
+    let mut undo: Option<String> = None;
     let message = match form.action.as_str() {
         "check" | "check_all" => {
             state
@@ -398,7 +426,7 @@ pub async fn bulk(State(state): State<SharedState>, Form(form): Form<BulkForm>) 
             if state.proxy_check_progress().running {
                 return Err(AppError::conflict("Wait for the running check to finish"));
             }
-            state.db.delete_proxies(&ids)?;
+            undo = Some(state.db.delete_proxies(&ids)?.undo);
             format!("Deleted {count} proxies")
         }
         "keep_healthy" | "delete_failed" => {
@@ -428,7 +456,7 @@ pub async fn bulk(State(state): State<SharedState>, Form(form): Form<BulkForm>) 
                     &[],
                 ));
             }
-            state.db.delete_proxies(&doomed)?;
+            undo = Some(state.db.delete_proxies(&doomed)?.undo);
             format!(
                 "Deleted {} {} proxies",
                 fmt_count(doomed.len() as i64),
@@ -455,9 +483,10 @@ pub async fn bulk(State(state): State<SharedState>, Form(form): Form<BulkForm>) 
     };
     let _ = state.refresh_running_pools();
     state.mark_proxies_dirty();
-    Ok(notify(
+    Ok(notify_with_undo(
         "ok",
         &message,
+        undo.as_deref(),
         &["proxies-changed", "selection-clear"],
     ))
 }
@@ -586,7 +615,32 @@ pub async fn delete_group(
             "This group is attached to an active search",
         ));
     }
-    state.db.delete_proxy_group(&id)?;
-    state.notice("ok", "Proxy group deleted; its proxies were kept");
+    let removed = state.db.delete_proxy_group(&id)?;
+    state.notice_with_undo("ok", "Proxy group deleted; its proxies were kept", Some(&removed.undo));
     Ok(redirect(&headers, "/proxies"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn offer(healthy: i64, slow: i64, failed: i64, unknown: i64) -> &'static str {
+        let counts = HashMap::from([
+            ("healthy".to_owned(), healthy),
+            ("slow".to_owned(), slow),
+            ("failed".to_owned(), failed),
+            ("unknown".to_owned(), unknown),
+        ]);
+        ProxyOffer::new(&HealthBar::new(&counts)).kind
+    }
+
+    #[test]
+    fn offer_matches_the_proxy_list() {
+        assert_eq!(offer(0, 0, 0, 0), "empty");
+        assert_eq!(offer(0, 0, 0, 12), "more");
+        assert_eq!(offer(42, 9, 8, 5), "more");
+        assert_eq!(offer(1, 0, 3, 0), "more", "too few checked to judge");
+        assert_eq!(offer(2, 1, 7, 0), "failing");
+    }
 }

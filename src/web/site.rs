@@ -163,11 +163,13 @@ pub fn minutes(wait: Duration) -> String {
 // ---------------------------------------------------------- headers
 
 /// Images on lead pages come from Google and Gravatar; scripts, styles and
-/// fonts are all served by the app. Alpine and htmx evaluate attribute
-/// expressions, which needs 'unsafe-eval'.
-const CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; \
+/// fonts are served by the app, except GitHub's star button in the sidebar
+/// (its script from buttons.github.io, its star count from api.github.com).
+/// Alpine and htmx evaluate attribute expressions, which needs 'unsafe-eval'.
+const CSP: &str = "default-src 'self'; \
+    script-src 'self' 'unsafe-inline' 'unsafe-eval' https://buttons.github.io https://api.github.com; \
     style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; \
-    connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+    connect-src 'self' https://api.github.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
 
 pub async fn security_headers(request: Request, next: Next) -> Response {
     let is_static = request.uri().path().starts_with("/static/");

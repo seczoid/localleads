@@ -1,0 +1,40 @@
+<div id="update-card" hx-get="/update/card" hx-trigger="update-changed from:body" hx-swap="outerHTML">
+{%- if u.enabled %}
+{%- if u.restarting %}
+  <div class="update-card" x-data="updateRestart('{{ u.version }}')" role="status">
+    <p class="update-title"><span class="pulse live"></span>Restarting…</p>
+    <p class="update-text" x-show="!slow">Back in a few seconds. Searches carry on where they were.</p>
+    <p class="update-text" x-show="slow" x-cloak>This is taking longer than usual. <a href="" @click.prevent="location.reload()">Reload the page</a></p>
+  </div>
+{%- else if !u.busy.is_empty() %}
+  <div class="update-card" x-data="updateRestart('{{ u.version }}')" role="status">
+    <p class="update-title">Updating to v{{ u.update }}</p>
+    <div class="progress indeterminate" aria-hidden="true"><i></i></div>
+    <p class="update-text">{{ u.busy }}</p>
+  </div>
+{%- else if !u.failed.is_empty() %}
+  <div class="update-card failed" role="alert">
+    <p class="update-title">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-warning"/></svg>Update didn't finish</p>
+    <p class="update-text">{{ u.failed }}. You're still on v{{ u.version }}.</p>
+    <div class="update-actions">
+      {%- if !u.update.is_empty() && !u.manual_only %}
+      <button type="button" class="btn sm" hx-post="/update" hx-confirm="Try updating to v{{ u.update }} again? Running searches pause for a few seconds and carry on after the restart.">Try again</button>
+      {%- endif %}
+      <button type="button" class="btn sm ghost" hx-post="/update/dismiss">Dismiss</button>
+    </div>
+  </div>
+{%- else if !u.update.is_empty() %}
+  <div class="update-card">
+    <p class="update-title">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-update"/></svg>v{{ u.update }} is out</p>
+    <a class="update-notes" href="{{ u.notes_url }}" target="_blank" rel="noopener">What's new ›</a>
+    {%- if u.manual_only %}
+    <a class="btn sm" href="{{ u.notes_url }}" target="_blank" rel="noopener">Download from GitHub</a>
+    {%- else %}
+    <button type="button" class="btn primary sm" hx-post="/update" hx-confirm="Update to v{{ u.update }} and restart? Running searches pause for a few seconds and carry on after the restart.">Update and restart</button>
+    {%- endif %}
+  </div>
+{%- endif %}
+{%- endif %}
+</div>

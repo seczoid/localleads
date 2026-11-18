@@ -535,7 +535,7 @@ impl LocalLeadsMcp {
     }
 
     #[tool(
-        description = "Permanently delete the selected proxies (ids, or all_matching with filters). Cannot be undone. Not allowed while a health check runs.",
+        description = "Delete the selected proxies (ids, or all_matching with filters), with their check history and group memberships. Not allowed while a health check runs. Returns an undo_id: undo_delete brings them back within 60 minutes.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true)
     )]
     async fn delete_proxies(&self, Parameters(selection): Parameters<ProxySelection>) -> ToolResult {
@@ -549,14 +549,14 @@ impl LocalLeadsMcp {
             .collect();
         let count = ids.len();
         let state = self.state.clone();
-        blocking(move || state.db.delete_proxies(&ids)).await?;
+        let removed = blocking(move || state.db.delete_proxies(&ids)).await?;
         self.proxies_changed();
         self.state.notice("ok", format!("Deleted {count} proxies"));
-        reply(json!({ "deleted": count }))
+        reply(json!({ "deleted": count, "undo_id": super::undo_id(count, removed.undo) }))
     }
 
     #[tool(
-        description = "Clean up proxies matching the filters (default: all): delete_failed removes proxies whose last check failed; keep_healthy removes everything not healthy (slow, failed, never checked). Cannot be undone. Not allowed while a health check runs.",
+        description = "Clean up proxies matching the filters (default: all): delete_failed removes proxies whose last check failed; keep_healthy removes everything not healthy (slow, failed, never checked). Not allowed while a health check runs. Returns an undo_id: undo_delete brings them back within 60 minutes.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true)
     )]
     async fn prune_proxies(&self, Parameters(params): Parameters<PruneParams>) -> ToolResult {
@@ -581,9 +581,10 @@ impl LocalLeadsMcp {
             .map(|proxy| proxy.id.clone())
             .collect();
         let count = doomed.len();
+        let mut undo = String::new();
         if count > 0 {
             let state = self.state.clone();
-            blocking(move || state.db.delete_proxies(&doomed)).await?;
+            undo = blocking(move || state.db.delete_proxies(&doomed)).await?.undo;
             self.proxies_changed();
             self.state.notice(
                 "ok",
@@ -593,7 +594,12 @@ impl LocalLeadsMcp {
                 ),
             );
         }
-        reply(json!({ "considered": proxies.len(), "deleted": count, "kept": proxies.len() - count }))
+        reply(json!({
+            "considered": proxies.len(),
+            "deleted": count,
+            "kept": proxies.len() - count,
+            "undo_id": super::undo_id(count, undo),
+        }))
     }
 
     #[tool(
@@ -691,7 +697,7 @@ impl LocalLeadsMcp {
     }
 
     #[tool(
-        description = "Delete a proxy group. Its proxies are kept. Not allowed while an active search uses the group.",
+        description = "Delete a proxy group. Its proxies are kept. Not allowed while an active search uses the group. Returns an undo_id: undo_delete brings it back within 60 minutes.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true)
     )]
     async fn delete_proxy_group(&self, Parameters(params): Parameters<GroupIdParams>) -> ToolResult {
@@ -699,10 +705,15 @@ impl LocalLeadsMcp {
         if self.state.group_in_use(&group.id).map_err(fail)? {
             return Err("this group is attached to an active search".to_owned());
         }
-        self.state.db.delete_proxy_group(&group.id).map_err(fail)?;
+        let removed = self.state.db.delete_proxy_group(&group.id).map_err(fail)?;
         self.state.notice("ok", "Proxy group deleted; its proxies were kept");
         self.proxies_changed();
-        reply(json!({ "deleted": group.id, "name": group.name, "proxies_kept": group.proxy_count }))
+        reply(json!({
+            "deleted": group.id,
+            "name": group.name,
+            "proxies_kept": group.proxy_count,
+            "undo_id": super::undo_id(1, removed.undo),
+        }))
     }
 
     #[tool(

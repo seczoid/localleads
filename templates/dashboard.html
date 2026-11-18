@@ -1,9 +1,0 @@
-{% extends "base.html" %}
-{% block title %}Dashboard{% endblock %}
-{% block heading %}<h1>Dashboard</h1>{% endblock %}
-{% block actions %}<a class="btn primary" href="/jobs/new">New search</a>{% endblock %}
-{% block content %}
-<div id="dashboard-live" hx-get="/partials/dashboard" hx-trigger="jobs-changed from:body, proxies-changed from:body" hx-swap="innerHTML">
-  {% include "partials/dashboard_live.html" %}
-</div>
-{% endblock %}

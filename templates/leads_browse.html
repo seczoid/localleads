@@ -1,59 +1,66 @@
 {% extends "base.html" %}
 {% block title %}{{ title }}{% endblock %}
-{% block heading %}<a class="crumb" href="/leads">Leads</a><h1>{{ title }}</h1>{% endblock %}
+{% block heading %}{% if !job_id.is_empty() %}<a class="crumb" href="/leads">Leads</a>{% endif %}<h1>{{ title }}</h1>{% endblock %}
+{% block sub %}{% if !subtitle.is_empty() %}<p class="page-sub">{{ subtitle }}{% if !job_id.is_empty() %}<span class="sep">·</span><a class="link quiet" href="/jobs/{{ job_id }}">Progress and setup</a>{% endif %}</p>{% endif %}{% endblock %}
 {% block actions %}
-{% if !job_id.is_empty() %}<a class="btn" href="/jobs/{{ job_id }}">Search details</a>{% endif %}
 <div class="menu-wrap" x-data="{ open: false }" @click.outside="open = false">
-  <button type="button" class="btn primary" @click="open = !open">Export ▾</button>
+  <button type="button" class="btn" @click="open = !open" :aria-expanded="open">Columns
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
+  <div class="menu right col-menu" x-show="open" x-cloak x-transition.opacity>
+    <template x-for="col in $store.cols.optional" :key="col.name">
+      <label class="check"><input type="checkbox" :checked="$store.cols.on(col.name)" @change="$store.cols.set(col.name, $event.target.checked)"><span x-text="col.label"></span></label>
+    </template>
+  </div>
+</div>
+<div class="menu-wrap" x-data="{ open: false }" @click.outside="open = false">
+  <button type="button" class="btn primary" @click="open = !open" :aria-expanded="open">Export
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
   <div class="menu right" x-show="open" x-cloak x-transition.opacity>
+    <p class="menu-note">Exports every lead that matches the filters.</p>
     <a :href="'/leads/export.csv?' + new URLSearchParams(new FormData(document.getElementById('lead-filters'))).toString()" hx-boost="false">Download CSV</a>
+    <button type="button" @click="open = false; llCsvColumns(new URLSearchParams(new FormData(document.getElementById('lead-filters'))).toString())">Choose CSV columns…</button>
     <a :href="'/leads/export.json?' + new URLSearchParams(new FormData(document.getElementById('lead-filters'))).toString()" hx-boost="false">Download JSON</a>
-    <button hx-post="/leads/export-disk" hx-include="#lead-filters">Save CSV + JSON beside the database</button>
+    <button hx-post="/leads/export-disk" hx-include="#lead-filters">Save CSV and JSON next to the database</button>
   </div>
 </div>
 {% endblock %}
 {% block content %}
-{% if !subtitle.is_empty() %}<p class="page-sub muted">{{ subtitle }}</p>{% endif %}
-<div class="browse" x-data="{ filtersOpen: false }">
-  {# The form holds the search box and facets; the table sits beside it so
-     facet swaps never touch it. It reloads after each swap (see app.js). #}
-  <form id="lead-filters" class="browse-form" hx-get="/partials/leads/browse" hx-target="#facets" hx-swap="outerHTML"
+<div class="leads-page" x-data="leadTable()">
+  {# The form holds the search box and the filter bar; the table sits below
+     it so filter swaps never touch it. It reloads after each swap (see app.js). #}
+  <form id="lead-filters" class="lead-filters" hx-get="/partials/leads/browse" hx-target="#facets" hx-swap="outerHTML"
         hx-trigger="change, input changed delay:300ms from:#lead-search, leads-changed from:body"
         hx-sync="this:replace" hx-disinherit="*" @submit.prevent>
-    <div class="browse-bar">
-      <input type="search" id="lead-search" name="q" value="{{ q }}" placeholder="Search name, category, address, phone, website…" autocomplete="off">
-      <button type="button" class="btn filters-toggle" @click="filtersOpen = !filtersOpen" :aria-expanded="filtersOpen" x-text="filtersOpen ? 'Hide filters' : 'Filters'">Filters</button>
-    </div>
+    <label class="lead-search">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-search"/></svg>
+      <input type="search" id="lead-search" name="q" value="{{ q }}" placeholder="Search name, phone, email, address…" autocomplete="off" aria-label="Search leads">
+    </label>
     {{ body|safe }}
   </form>
-  <section class="card results" x-data="leadTable()">
-    {# Plain form posts download the exports; Delete goes through htmx. #}
-    <form id="lead-bulk" class="bulkbar has-selection" method="post" action="/leads/bulk" hx-boost="false"
-          x-show="count() > 0" x-cloak x-transition.opacity
-          @submit="$el.elements.filters.value = filterQs(); $el.elements.sort.value = tableSort()"
-          @htmx:config-request="$event.detail.parameters.filters = filterQs(); $event.detail.parameters.sort = tableSort()">
-      <template x-for="id in (allMatching ? [] : ids())" :key="id"><input type="hidden" name="ids" :value="id"></template>
-      <input type="hidden" name="all_matching" :value="allMatching ? '1' : ''">
-      <input type="hidden" name="filters" value="">
-      <input type="hidden" name="sort" value="">
-      <span class="sel-count" x-text="count().toLocaleString() + ' selected'"></span>
-      <button type="button" class="link" x-show="!allMatching && matching > selected.size" @click="allMatching = true" x-text="'Select all ' + matching.toLocaleString()"></button>
-      <button type="button" class="link quiet" @click="clear()">Clear</button>
-      <span class="spacer"></span>
-      <button type="button" class="btn sm" hx-post="/leads/bulk" hx-vals='{"action": "enrich"}'
-              :hx-confirm="'Find emails for ' + count().toLocaleString() + (count() === 1 ? ' lead' : ' leads') + '? Each website is read and each address checked with its mail server, in the background.'">Find emails</button>
-      <button class="btn sm primary" name="action" value="csv">Export CSV</button>
-      <button class="btn sm" name="action" value="json">Export JSON</button>
-      <button type="button" class="btn sm danger" hx-post="/leads/bulk" hx-vals='{"action": "delete"}'
-              :hx-confirm="'Delete ' + count().toLocaleString() + (count() === 1 ? ' lead' : ' leads') + '? They are removed from every search that found them.'">Delete</button>
-    </form>
-    <table id="leads-dt" class="table hover leads-table" data-leads-table hx-history="false" data-form="lead-filters">
-      <thead><tr>
-        <th class="w-check"><input type="checkbox" aria-label="Select this page" :checked="pageSelected()" @change="togglePage($event.target.checked)"></th>
-        <th class="num w-num">#</th>
-        <th>Business</th><th>Location</th><th>Phone</th><th>Website</th><th>Email</th><th class="num">Rating</th><th class="num">Added</th>
-      </tr></thead>
-    </table>
-  </section>
+
+  <div class="table-panel">
+    <table id="leads-dt" class="table hover leads-table stack-sm" data-leads-table hx-history="false" data-form="lead-filters"></table>
+  </div>
+
+  {# Plain form posts download the exports; Delete and Find emails go through htmx. #}
+  <form id="lead-bulk" class="selbar" method="post" action="/leads/bulk" hx-boost="false"
+        x-show="count() > 0" x-cloak x-transition.opacity
+        @submit="$el.elements.filters.value = filterQs(); $el.elements.sort.value = tableSort()"
+        @htmx:config-request="$event.detail.parameters.filters = filterQs(); $event.detail.parameters.sort = tableSort()">
+    <template x-for="id in (allMatching ? [] : ids())" :key="id"><input type="hidden" name="ids" :value="id"></template>
+    <input type="hidden" name="all_matching" :value="allMatching ? '1' : ''">
+    <input type="hidden" name="filters" value="">
+    <input type="hidden" name="sort" value="">
+    <span class="sel-count" x-text="count().toLocaleString() + ' selected'"></span>
+    <button type="button" class="link" x-show="!allMatching && matching > selected.size" @click="allMatching = true" x-text="'Select all ' + matching.toLocaleString()"></button>
+    <button type="button" class="link quiet" @click="clear()">Clear</button>
+    <span class="spacer"></span>
+    <button type="button" class="btn sm" hx-post="/leads/bulk" hx-vals='{"action": "enrich"}'
+            :hx-confirm="'Look for emails again for ' + count().toLocaleString() + (count() === 1 ? ' lead' : ' leads') + '? Each website is read and each address checked with its mail server, in the background.'">Find emails again</button>
+    <button class="btn sm primary" name="action" value="csv">Export CSV</button>
+    <button class="btn sm" name="action" value="json">Export JSON</button>
+    <button type="button" class="btn sm danger" hx-post="/leads/bulk" hx-vals='{"action": "delete"}'
+            :hx-confirm="'Delete ' + count().toLocaleString() + (count() === 1 ? ' lead' : ' leads') + '? They are removed from every search that found them. You can undo this for an hour.'">Delete</button>
+  </form>
 </div>
 {% endblock %}

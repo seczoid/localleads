@@ -109,12 +109,8 @@ pub struct JobView {
     pub name: String,
     pub status: String,
     pub status_class: &'static str,
-    pub collected: String,
-    pub total_label: String,
     pub has_target: bool,
     pub pct: u32,
-    pub failures: i64,
-    pub duplicates: i64,
     pub error: String,
     pub started: String,
     pub finished: String,
@@ -123,10 +119,66 @@ pub struct JobView {
     pub can_pause: bool,
     pub can_resume: bool,
     pub can_stop: bool,
-    pub searches: usize,
+    /// Stopped, failed or cut off: it can carry on from where it was.
+    pub can_continue: bool,
     pub queries: String,
     pub locations: String,
     pub tags: Vec<String>,
+    /// Leads per minute while running; empty otherwise.
+    pub rate: String,
+    /// Rough time left while running toward a limit; empty otherwise.
+    pub eta: String,
+    pub started_ago: String,
+}
+
+/// "under a minute", "12 min", "3 h 20 min", "2 days".
+pub fn fmt_duration(seconds: i64) -> String {
+    match seconds {
+        ..60 => "under a minute".to_owned(),
+        60..3_600 => format!("{} min", seconds / 60),
+        3_600..86_400 => {
+            let minutes = (seconds % 3_600) / 60;
+            if minutes == 0 {
+                format!("{} h", seconds / 3_600)
+            } else {
+                format!("{} h {minutes} min", seconds / 3_600)
+            }
+        }
+        _ => {
+            let days = seconds / 86_400;
+            format!("{days} day{}", if days == 1 { "" } else { "s" })
+        }
+    }
+}
+
+/// Leads per minute and time left for a running search.
+fn rate_eta(job: &JobSummary) -> (String, String) {
+    if job.status != JobStatus::Running || job.collected <= 0 {
+        return (String::new(), String::new());
+    }
+    let Some(start) = job
+        .started_at
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+    else {
+        return (String::new(), String::new());
+    };
+    let seconds = (chrono::Utc::now() - start.with_timezone(&chrono::Utc)).num_seconds();
+    if seconds < 60 {
+        return (String::new(), String::new());
+    }
+    let per_minute = job.collected as f64 * 60.0 / seconds as f64;
+    let rate = if per_minute >= 10.0 {
+        fmt_count(per_minute.round() as i64)
+    } else {
+        format!("{per_minute:.1}")
+    };
+    let eta = if job.total > job.collected && per_minute > 0.0 {
+        fmt_duration(((job.total - job.collected) as f64 / per_minute * 60.0) as i64)
+    } else {
+        String::new()
+    };
+    (rate, eta)
 }
 
 impl JobView {
@@ -139,21 +191,14 @@ impl JobView {
             percent(job.collected, job.total)
         };
         let locations = location_summary(&job.config);
+        let (rate, eta) = rate_eta(job);
         Self {
             id: job.id.clone(),
             name: job.name.clone(),
             status: job.status.to_string(),
             status_class: job_status_class(job.status),
-            collected: fmt_count(job.collected),
-            total_label: if has_target {
-                fmt_count(job.total)
-            } else {
-                "all".to_owned()
-            },
             has_target,
             pct,
-            failures: job.failures,
-            duplicates: job.duplicates,
             error: job.error.clone().unwrap_or_default(),
             started: fmt_time(job.started_at.as_deref()),
             finished: fmt_time(job.finished_at.as_deref()),
@@ -166,11 +211,190 @@ impl JobView {
                     job.status,
                     JobStatus::Queued | JobStatus::Running | JobStatus::Paused
                 ),
-            searches: job.config.lookup_count(),
+            can_continue: !live
+                && matches!(
+                    job.status,
+                    JobStatus::Cancelled | JobStatus::Failed | JobStatus::Interrupted
+                ),
             queries: job.config.queries.join(", "),
             locations,
             tags: job.config.tags.clone(),
+            rate,
+            eta,
+            started_ago: fmt_ago(job.started_at.as_deref()),
         }
+    }
+}
+
+/// A search's two stages side by side: finding businesses on Google Maps,
+/// and reading each one's website (and place page) for emails.
+pub struct StagesView {
+    pub maps_num: String,
+    pub maps_of: String,
+    pub maps_pct: u32,
+    pub maps_moving: bool,
+    pub maps_detail: String,
+    pub maps_failed: String,
+    /// Google Maps is finished and the websites are being read.
+    pub maps_done: bool,
+    pub web_on: bool,
+    pub web_title: &'static str,
+    pub web_num: String,
+    pub web_of: String,
+    pub web_pct: u32,
+    pub web_detail: String,
+}
+
+impl StagesView {
+    pub fn new(
+        job: &JobSummary,
+        live: Option<crate::events::LiveProgress>,
+        counts: crate::db::EnrichCounts,
+        web_per_minute: Option<f64>,
+    ) -> Self {
+        let active = job.status.is_active();
+        let has_target = job.total > 0;
+        // Websites are read once Google Maps is done. Right after a restart
+        // there is no live state yet; leads already read mean Maps is done.
+        let reading_sites = active
+            && job.config.enriches()
+            && live.map_or(counts.read > 0, |live| live.reading_sites);
+        let maps_pct = if job.status == JobStatus::Completed || reading_sites {
+            100
+        } else if has_target {
+            percent(job.collected, job.total)
+        } else {
+            live.map_or(0, |live| percent(live.lookups_done, live.total_lookups))
+        };
+        let planned = i64::try_from(job.config.lookup_count()).unwrap_or(i64::MAX);
+        let mut detail = match live {
+            Some(live) if reading_sites => format!(
+                "Done · {} {} searched",
+                fmt_count(live.total_lookups),
+                if live.total_lookups == 1 { "area" } else { "areas" }
+            ),
+            Some(live) if active => format!(
+                "{} of {} areas searched",
+                fmt_count(live.lookups_done),
+                fmt_count(live.total_lookups)
+            ),
+            _ => format!("{} {}", fmt_count(planned), if planned == 1 { "area" } else { "areas" }),
+        };
+        if !active && !has_target && job.status != JobStatus::Completed {
+            detail.push_str(", stopped before all were searched");
+        }
+        if job.duplicates > 0 {
+            detail.push_str(&format!(" · {} repeats skipped", fmt_count(job.duplicates)));
+        }
+        let find_emails = job.config.find_emails;
+        let mut web_detail = if active && !reading_sites {
+            "Starts when Google Maps is done".to_owned()
+        } else if counts.leads == 0 {
+            "No leads to read".to_owned()
+        } else if find_emails {
+            format!(
+                "{} with an email",
+                fmt_count(counts.with_email)
+            )
+        } else {
+            "Reviews, owner and photos from each place page".to_owned()
+        };
+        if let Some(pace) = web_per_minute.filter(|pace| reading_sites && *pace > 0.0) {
+            web_detail.push_str(&format!(" · {} sites a minute", fmt_count(pace.round() as i64)));
+            let left = counts.leads - counts.read;
+            if left > 0 {
+                web_detail.push_str(&format!(
+                    " · about {} left",
+                    fmt_duration((left as f64 / pace * 60.0) as i64)
+                ));
+            }
+        }
+        if let Some(live) = live.filter(|live| active && live.checking > 0) {
+            web_detail.push_str(&format!(" · checking emails of {}", fmt_count(live.checking)));
+        }
+        Self {
+            maps_num: fmt_count(job.collected),
+            maps_of: if has_target {
+                format!("of {} leads", fmt_count(job.total))
+            } else {
+                "leads".to_owned()
+            },
+            maps_pct,
+            maps_moving: active && !has_target && live.is_none(),
+            maps_detail: detail,
+            maps_done: reading_sites,
+            maps_failed: if job.failures > 0 {
+                format!(
+                    "{} {} failed",
+                    fmt_count(job.failures),
+                    if job.failures == 1 { "area" } else { "areas" }
+                )
+            } else {
+                String::new()
+            },
+            web_on: job.config.enriches(),
+            web_title: if find_emails { "Websites" } else { "Google place pages" },
+            web_num: fmt_count(counts.read),
+            web_of: format!("of {} read", fmt_count(counts.leads)),
+            web_pct: percent(counts.read, counts.leads),
+            web_detail,
+        }
+    }
+}
+
+/// A search's setup in one plain sentence: "hvac and plumber across the
+/// United States, up to 1,000 leads, with emails and place details, 10
+/// requests at a time through all enabled proxies."
+pub fn setup_sentence(config: &crate::models::SearchConfig, group: Option<&str>) -> String {
+    let what = name_list(
+        &config
+            .queries
+            .iter()
+            .filter(|query| !query.trim().is_empty())
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    let place = location_summary(config);
+    let limit = if config.collect_all {
+        "every lead Google Maps has".to_owned()
+    } else {
+        format!("up to {} leads", fmt_count(i64::from(config.total_limit)))
+    };
+    let mut extras = Vec::new();
+    if config.find_emails {
+        extras.push("emails from each website".to_owned());
+    }
+    if config.place_details {
+        extras.push("Google place details".to_owned());
+    }
+    if config.verify_emails {
+        extras.push("email checks".to_owned());
+    }
+    let extras = if extras.is_empty() {
+        "no extras".to_owned()
+    } else {
+        format!("with {}", name_list(&extras))
+    };
+    let proxies = match group {
+        Some(name) => format!("through the {name} proxy group"),
+        None if config.require_proxy => "through all enabled proxies".to_owned(),
+        None if config.allow_direct => "through all enabled proxies, or directly when none is free".to_owned(),
+        None => "through all enabled proxies".to_owned(),
+    };
+    let place = if place.is_empty() {
+        String::new()
+    } else {
+        format!(" in {place}")
+    };
+    let sentence = format!(
+        "{what}{place}, {limit}, {extras}, {} request{} at a time {proxies}.",
+        config.concurrency,
+        if config.concurrency == 1 { "" } else { "s" }
+    );
+    let mut chars = sentence.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => sentence,
     }
 }
 
@@ -824,26 +1048,16 @@ impl GroupView {
 #[derive(Clone, Debug)]
 pub struct StatsView {
     pub jobs: String,
-    pub active_jobs: String,
     pub leads: String,
-    pub phone_pct: u32,
-    pub website_pct: u32,
     pub proxies: String,
-    pub healthy_proxies: String,
-    pub healthy_pct: u32,
 }
 
 impl From<DashboardStats> for StatsView {
     fn from(stats: DashboardStats) -> Self {
         Self {
             jobs: fmt_count(stats.jobs),
-            active_jobs: fmt_count(stats.active_jobs),
             leads: fmt_count(stats.leads),
-            phone_pct: percent(stats.leads_with_phone, stats.leads),
-            website_pct: percent(stats.leads_with_website, stats.leads),
             proxies: fmt_count(stats.proxies),
-            healthy_proxies: fmt_count(stats.healthy_proxies),
-            healthy_pct: percent(stats.healthy_proxies, stats.proxies),
         }
     }
 }

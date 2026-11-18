@@ -26,9 +26,13 @@ const MAX_CHECKED: usize = 5;
 /// Mail-server checks at once for one lead.
 #[cfg(feature = "verify")]
 const CHECKS_AT_ONCE: usize = 3;
-/// Mail-server checks at once across all leads of a run.
+/// Mail-server checks at once across all leads of a run, from one IP.
 #[cfg(feature = "verify")]
 const CHECKS_IN_ALL: usize = 48;
+/// Checks at once per SOCKS5 proxy: few enough that mail servers don't
+/// start refusing an IP, which would turn real mailboxes into "unknown".
+#[cfg(feature = "verify")]
+const CHECKS_PER_PROXY: usize = 4;
 
 /// How sure we are that mail to this address arrives.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -81,6 +85,17 @@ pub struct Enricher {
     max_retries: u32,
     language: String,
     region: String,
+}
+
+/// Mail-server checks at once: more with more SOCKS5 proxies to spread
+/// them over, never more than the search's own concurrency.
+#[cfg(feature = "verify")]
+fn check_slots(verifier: Option<&Verifier>, concurrency: usize) -> usize {
+    match verifier {
+        Some(verifier) if verifier.via_proxies() => (verifier.proxy_count() * CHECKS_PER_PROXY)
+            .clamp(CHECKS_IN_ALL, concurrency.max(CHECKS_IN_ALL)),
+        _ => CHECKS_IN_ALL,
+    }
 }
 
 /// One address in the lead's `emails` list.
@@ -137,13 +152,18 @@ impl Enricher {
         } else {
             None
         };
-        let place_slots = usize::try_from(config.concurrency).unwrap_or(1).clamp(1, 64);
+        let place_slots = usize::try_from(config.concurrency).unwrap_or(1).clamp(
+            1,
+            usize::try_from(crate::models::MAX_CONCURRENCY).unwrap_or(500),
+        );
+        #[cfg(feature = "verify")]
+        let checks = check_slots(verifier.as_ref(), place_slots);
         Ok(Self {
             site,
             #[cfg(feature = "verify")]
             verifier,
             #[cfg(feature = "verify")]
-            check_slots: Semaphore::new(CHECKS_IN_ALL),
+            check_slots: Semaphore::new(checks),
             place_slots: Semaphore::new(place_slots),
             place_details: config.place_details,
             pool,
@@ -152,7 +172,7 @@ impl Enricher {
             allow_direct: config.allow_direct,
             max_retries: config.max_retries.min(4),
             language: crate::scraper::language(config).to_owned(),
-            region: crate::scraper::region(config).unwrap_or("us").to_owned(),
+            region: crate::scraper::region(config).map_or_else(|| "us".to_owned(), Into::into),
         })
     }
 

@@ -205,13 +205,28 @@ impl LocationSelection {
         }
     }
 
+    #[cfg(test)]
     pub fn locations(&self) -> Vec<String> {
         self.places().into_iter().map(|place| place.label).collect()
     }
 
-    /// Whether states can be split into cities and ZIP codes.
+    /// Whether states can be split into cities and postal codes.
     pub fn can_split(&self) -> bool {
-        self.country == "United States"
+        is_us(&self.country) || self.world().is_some()
+    }
+
+    fn world(&self) -> Option<&'static crate::world::Country> {
+        if is_us(&self.country) {
+            None
+        } else {
+            crate::world::country(&self.country)
+        }
+    }
+
+    /// Whether the finest split is by postal code (the US and about a
+    /// hundred other countries) rather than by town.
+    pub fn has_postal_codes(&self) -> bool {
+        is_us(&self.country) || self.world().is_some_and(crate::world::Country::has_postal)
     }
 
     fn picked_states(&self) -> Vec<&str> {
@@ -227,30 +242,100 @@ impl LocationSelection {
         }
     }
 
+    /// The state a picked city is in.
+    fn city_state(&self, city: &str) -> Option<String> {
+        match self.world() {
+            Some(country) => country.city_state(city).map(str::to_lowercase),
+            None => city
+                .rsplit_once(',')
+                .and_then(|(_, state)| crate::geo::us_state_code(state))
+                .map(str::to_lowercase),
+        }
+    }
+
+    fn state_key(&self, state: &str) -> Option<String> {
+        match self.world() {
+            Some(country) => country
+                .state(state)
+                .and_then(|index| country.states.get(index))
+                .map(|name| name.to_lowercase()),
+            None => crate::geo::us_state_code(state).map(str::to_lowercase),
+        }
+    }
+
     /// Picked cities whose whole state isn't picked too.
     fn picked_cities(&self, states: &[&str]) -> Vec<&str> {
         if self.mode != LocationMode::States {
             return Vec::new();
         }
-        let state_codes: Vec<&str> = states
-            .iter()
-            .filter_map(|state| crate::geo::us_state_code(state))
-            .collect();
+        let picked: Vec<String> = states.iter().filter_map(|state| self.state_key(state)).collect();
         self.cities
             .iter()
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
-            .filter(|city| {
-                let code = city
-                    .rsplit_once(',')
-                    .and_then(|(_, state)| crate::geo::us_state_code(state));
-                !code.is_some_and(|code| state_codes.contains(&code))
-            })
+            .filter(|city| !self.city_state(city).is_some_and(|state| picked.contains(&state)))
             .collect()
     }
 
     fn splits(&self) -> bool {
         self.can_split() && self.depth != AreaDepth::Region
+    }
+
+    /// The depth a state is split to: ZIP depth means towns in countries
+    /// without postal codes.
+    fn by_postal_code(&self) -> bool {
+        self.depth == AreaDepth::Zip && self.has_postal_codes()
+    }
+
+    fn state_area_count(&self, state: &str) -> usize {
+        if !self.splits() {
+            return 0;
+        }
+        match self.world() {
+            Some(country) => country.area_count(Some(state), self.by_postal_code()),
+            None => crate::geo::us_area_count(state, self.depth == AreaDepth::City),
+        }
+    }
+
+    fn state_areas(&self, state: &str) -> Vec<crate::geo::Area> {
+        if !self.splits() {
+            return Vec::new();
+        }
+        match self.world() {
+            Some(country) if self.by_postal_code() => country.postal_areas(Some(state)),
+            Some(country) => country.town_areas(Some(state)),
+            None if self.depth == AreaDepth::City => crate::geo::us_city_areas(state),
+            None => crate::geo::us_zip_areas(state),
+        }
+    }
+
+    fn city_area_count(&self, city: &str) -> usize {
+        if !(self.splits() && self.by_postal_code()) {
+            return 1;
+        }
+        match self.world() {
+            Some(country) => country.city_postal_count(city).max(1),
+            None => crate::geo::us_city_zip_count(city).max(1),
+        }
+    }
+
+    fn city_areas(&self, city: &str) -> Vec<crate::geo::Area> {
+        let world = self.world();
+        if self.splits() && self.by_postal_code() {
+            let areas = match world {
+                Some(country) => country.city_postal_areas(city),
+                None => crate::geo::us_city_zip_areas(city),
+            };
+            if !areas.is_empty() {
+                return areas;
+            }
+        }
+        world.and_then(|country| country.city_area(city)).into_iter().collect()
+    }
+
+    /// The place a state is searched as when it isn't split.
+    fn state_place(&self, state: &str) -> Place {
+        Place::named(format!("{state}, {}", self.country))
     }
 
     /// `places().len()`, without building the list.
@@ -265,26 +350,17 @@ impl LocationSelection {
         let states = self.picked_states();
         let cities = self.picked_cities(&states);
         if states.is_empty() && cities.is_empty() {
-            return 1;
+            // A country without states: its towns or postal codes.
+            return self
+                .world()
+                .filter(|_| self.splits())
+                .map_or(1, |country| country.area_count(None, self.by_postal_code()).max(1));
         }
         let state_places: usize = states
             .iter()
-            .map(|state| {
-                let count = match self.depth {
-                    _ if !self.splits() => 0,
-                    AreaDepth::City => crate::geo::us_area_count(state, true),
-                    _ => crate::geo::us_area_count(state, false),
-                };
-                count.max(1)
-            })
+            .map(|state| self.state_area_count(state).max(1))
             .sum();
-        let city_places: usize = cities
-            .iter()
-            .map(|city| match self.depth {
-                AreaDepth::Zip if self.splits() => crate::geo::us_city_zip_count(city).max(1),
-                _ => 1,
-            })
-            .sum();
+        let city_places: usize = cities.iter().map(|city| self.city_area_count(city)).sum();
         state_places + city_places
     }
 
@@ -293,14 +369,19 @@ impl LocationSelection {
     /// reaches it in the fewest requests.
     pub fn places(&self) -> Vec<Place> {
         if self.mode == LocationMode::PostalCodes {
-            let us = self.can_split();
+            let world = self.world();
+            let us = is_us(&self.country);
             return self
                 .postal_codes
                 .iter()
                 .map(|value| value.trim())
                 .filter(|value| !value.is_empty())
                 .map(|code| {
-                    let known = us.then(|| crate::geo::us_zip_place(code)).flatten();
+                    let known = match world {
+                        Some(country) => country.postal_place(code),
+                        None if us => crate::geo::us_zip_place(code),
+                        None => None,
+                    };
                     Place {
                         label: known
                             .as_ref()
@@ -314,9 +395,6 @@ impl LocationSelection {
         }
         let states = self.picked_states();
         let cities = self.picked_cities(&states);
-        if states.is_empty() && cities.is_empty() {
-            return vec![Place::named(self.country.clone())];
-        }
         let mut weighted: Vec<(u32, Place)> = Vec::new();
         let push_areas = |areas: Vec<crate::geo::Area>, weighted: &mut Vec<(u32, Place)>| {
             weighted.extend(areas.into_iter().map(|area| {
@@ -330,23 +408,28 @@ impl LocationSelection {
                 )
             }));
         };
-        for state in &states {
-            let areas = match self.depth {
-                _ if !self.splits() => Vec::new(),
-                AreaDepth::City => crate::geo::us_city_areas(state),
-                _ => crate::geo::us_zip_areas(state),
+        if states.is_empty() && cities.is_empty() {
+            // A country without states: its towns or postal codes.
+            let areas = match self.world() {
+                Some(country) if self.splits() && self.by_postal_code() => country.postal_areas(None),
+                Some(country) if self.splits() => country.town_areas(None),
+                _ => Vec::new(),
             };
             if areas.is_empty() {
-                weighted.push((0, Place::named(format!("{state}, {}", self.country))));
+                return vec![Place::named(self.country.clone())];
+            }
+            push_areas(areas, &mut weighted);
+        }
+        for state in &states {
+            let areas = self.state_areas(state);
+            if areas.is_empty() {
+                weighted.push((0, self.state_place(state)));
             } else {
                 push_areas(areas, &mut weighted);
             }
         }
         for city in &cities {
-            let areas = match self.depth {
-                AreaDepth::Zip if self.splits() => crate::geo::us_city_zip_areas(city),
-                _ => Vec::new(),
-            };
+            let areas = self.city_areas(city);
             if areas.is_empty() {
                 weighted.push((0, Place::named((*city).to_owned())));
             } else {
@@ -363,185 +446,98 @@ impl LocationSelection {
     }
 }
 
-/// Google's `gl` region code for a country in `COUNTRY_OPTIONS`. Without
-/// it Google Maps returns far fewer results (5 instead of 150 for a US ZIP).
-pub fn country_region(country: &str) -> Option<&'static str> {
-    Some(match country {
-        "United States" => "us",
-        "United Kingdom" => "gb",
-        "Germany" => "de",
-        "Canada" => "ca",
-        "Australia" => "au",
-        "India" => "in",
-        "France" => "fr",
-        "Spain" => "es",
-        "Italy" => "it",
-        "Brazil" => "br",
-        "Mexico" => "mx",
-        "Japan" => "jp",
-        _ => return None,
-    })
+/// Google's `gl` region code for a country: its ISO code. Without it
+/// Google Maps returns far fewer results (5 instead of 150 for a US ZIP).
+pub fn country_region(country: &str) -> Option<String> {
+    if is_us(country) {
+        return Some("us".to_owned());
+    }
+    crate::world::iso(country).map(str::to_ascii_lowercase)
 }
 
 /// Most lookups a search may run at once.
 pub const MAX_CONCURRENCY: u32 = 500;
 
-pub const COUNTRY_OPTIONS: &[&str] = &[
-    "United States",
-    "United Kingdom",
-    "Germany",
-    "Canada",
-    "Australia",
-    "India",
-    "France",
-    "Spain",
-    "Italy",
-    "Brazil",
-    "Mexico",
-    "Japan",
-];
+const US: &str = "United States";
 
-pub fn country_subdivisions(country: &str) -> &'static [&'static str] {
-    match country {
-        "United States" => &[
-            "Alabama",
-            "Alaska",
-            "Arizona",
-            "Arkansas",
-            "California",
-            "Colorado",
-            "Connecticut",
-            "Delaware",
-            "District of Columbia",
-            "Florida",
-            "Georgia",
-            "Hawaii",
-            "Idaho",
-            "Illinois",
-            "Indiana",
-            "Iowa",
-            "Kansas",
-            "Kentucky",
-            "Louisiana",
-            "Maine",
-            "Maryland",
-            "Massachusetts",
-            "Michigan",
-            "Minnesota",
-            "Mississippi",
-            "Missouri",
-            "Montana",
-            "Nebraska",
-            "Nevada",
-            "New Hampshire",
-            "New Jersey",
-            "New Mexico",
-            "New York",
-            "North Carolina",
-            "North Dakota",
-            "Ohio",
-            "Oklahoma",
-            "Oregon",
-            "Pennsylvania",
-            "Puerto Rico",
-            "Rhode Island",
-            "South Carolina",
-            "South Dakota",
-            "Tennessee",
-            "Texas",
-            "Utah",
-            "Vermont",
-            "Virginia",
-            "Washington",
-            "West Virginia",
-            "Wisconsin",
-            "Wyoming",
-        ],
-        "United Kingdom" => &["England", "Scotland", "Wales", "Northern Ireland"],
-        "Germany" => &[
-            "Baden-Wuerttemberg",
-            "Bavaria",
-            "Berlin",
-            "Brandenburg",
-            "Bremen",
-            "Hamburg",
-            "Hesse",
-            "Lower Saxony",
-            "Mecklenburg-Vorpommern",
-            "North Rhine-Westphalia",
-            "Rhineland-Palatinate",
-            "Saarland",
-            "Saxony",
-            "Saxony-Anhalt",
-            "Schleswig-Holstein",
-            "Thuringia",
-        ],
-        "Canada" => &[
-            "Alberta",
-            "British Columbia",
-            "Manitoba",
-            "New Brunswick",
-            "Newfoundland and Labrador",
-            "Northwest Territories",
-            "Nova Scotia",
-            "Nunavut",
-            "Ontario",
-            "Prince Edward Island",
-            "Quebec",
-            "Saskatchewan",
-            "Yukon",
-        ],
-        "Australia" => &[
-            "Australian Capital Territory",
-            "New South Wales",
-            "Northern Territory",
-            "Queensland",
-            "South Australia",
-            "Tasmania",
-            "Victoria",
-            "Western Australia",
-        ],
-        "India" => &[
-            "Andhra Pradesh",
-            "Arunachal Pradesh",
-            "Assam",
-            "Bihar",
-            "Chhattisgarh",
-            "Goa",
-            "Gujarat",
-            "Haryana",
-            "Himachal Pradesh",
-            "Jharkhand",
-            "Karnataka",
-            "Kerala",
-            "Madhya Pradesh",
-            "Maharashtra",
-            "Manipur",
-            "Meghalaya",
-            "Mizoram",
-            "Nagaland",
-            "Odisha",
-            "Punjab",
-            "Rajasthan",
-            "Sikkim",
-            "Tamil Nadu",
-            "Telangana",
-            "Tripura",
-            "Uttar Pradesh",
-            "Uttarakhand",
-            "West Bengal",
-            "Andaman and Nicobar Islands",
-            "Chandigarh",
-            "Dadra and Nagar Haveli and Daman and Diu",
-            "Delhi",
-            "Jammu and Kashmir",
-            "Ladakh",
-            "Lakshadweep",
-            "Puducherry",
-        ],
-        _ => &[],
-    }
+/// Whether a country names the United States (whose places are `geo`).
+pub fn is_us(country: &str) -> bool {
+    matches!(
+        country.trim().to_lowercase().as_str(),
+        "united states" | "us" | "usa" | "united states of america"
+    )
 }
+
+/// Every country a search can cover: the United States first, then the
+/// rest alphabetically.
+pub fn country_options() -> Vec<&'static str> {
+    std::iter::once(US)
+        .chain(crate::world::countries().iter().map(|(name, _)| *name))
+        .collect()
+}
+
+/// A country's states, provinces or regions.
+pub fn country_subdivisions(country: &str) -> &'static [&'static str] {
+    if is_us(country) {
+        return US_STATES;
+    }
+    crate::world::country(country).map_or(&[], |country| country.states.as_slice())
+}
+
+const US_STATES: &[&str] = &[
+    "Alabama",
+    "Alaska",
+    "Arizona",
+    "Arkansas",
+    "California",
+    "Colorado",
+    "Connecticut",
+    "Delaware",
+    "District of Columbia",
+    "Florida",
+    "Georgia",
+    "Hawaii",
+    "Idaho",
+    "Illinois",
+    "Indiana",
+    "Iowa",
+    "Kansas",
+    "Kentucky",
+    "Louisiana",
+    "Maine",
+    "Maryland",
+    "Massachusetts",
+    "Michigan",
+    "Minnesota",
+    "Mississippi",
+    "Missouri",
+    "Montana",
+    "Nebraska",
+    "Nevada",
+    "New Hampshire",
+    "New Jersey",
+    "New Mexico",
+    "New York",
+    "North Carolina",
+    "North Dakota",
+    "Ohio",
+    "Oklahoma",
+    "Oregon",
+    "Pennsylvania",
+    "Puerto Rico",
+    "Rhode Island",
+    "South Carolina",
+    "South Dakota",
+    "Tennessee",
+    "Texas",
+    "Utah",
+    "Vermont",
+    "Virginia",
+    "Washington",
+    "West Virginia",
+    "Wisconsin",
+    "Wyoming",
+];
 
 impl fmt::Display for SearchMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -823,7 +819,12 @@ impl ProxyEntry {
                 if parsed.password().is_some() {
                     let _ = parsed.set_password(Some("******"));
                 }
-                parsed.to_string()
+                // The URL parser adds a "/" path to `http://host:port`.
+                let text = parsed.to_string();
+                match text.strip_suffix('/') {
+                    Some(bare) if parsed.path() == "/" && !self.url.ends_with('/') => bare.to_owned(),
+                    _ => text,
+                }
             }
             Err(_) => "[invalid proxy]".to_owned(),
         }
@@ -939,6 +940,60 @@ pub fn now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn world_selection(country: &str, depth: AreaDepth) -> LocationSelection {
+        LocationSelection {
+            country: country.to_owned(),
+            mode: LocationMode::All,
+            depth,
+            ..LocationSelection::default()
+        }
+    }
+
+    #[test]
+    fn other_countries_split_like_the_us() {
+        // France: postal codes, then towns, then regions.
+        let zip = world_selection("France", AreaDepth::Zip);
+        let city = world_selection("France", AreaDepth::City);
+        let region = world_selection("France", AreaDepth::Region);
+        assert!(zip.can_split() && zip.has_postal_codes());
+        let places = zip.places();
+        assert_eq!(places.len(), zip.place_count());
+        assert!(places.len() > 3_000, "{}", places.len());
+        assert!(places.iter().all(|place| place.center.is_some() && place.label.ends_with(", France")));
+        assert!(city.place_count() > 1_000);
+        assert_eq!(region.place_count(), country_subdivisions("France").len());
+        assert_eq!(country_region("France").as_deref(), Some("fr"));
+
+        // Nigeria has no postal codes: the finest split is by town.
+        let nigeria = world_selection("Nigeria", AreaDepth::Zip);
+        assert!(nigeria.can_split() && !nigeria.has_postal_codes());
+        assert_eq!(nigeria.place_count(), world_selection("Nigeria", AreaDepth::City).place_count());
+
+        // A picked city in a state that isn't picked is searched by its postal codes.
+        let lyon = LocationSelection {
+            country: "France".to_owned(),
+            mode: LocationMode::States,
+            states: vec!["Brittany".to_owned()],
+            cities: vec!["Lyon, Auvergne-Rhone-Alpes".to_owned()],
+            depth: AreaDepth::Zip,
+            ..LocationSelection::default()
+        };
+        let places = lyon.places();
+        assert_eq!(places.len(), lyon.place_count());
+        assert!(places.iter().any(|place| place.label.starts_with("690")), "{:?}", &places[..3]);
+        assert!(places.iter().any(|place| place.label.starts_with("29")));
+
+        // Typed postal codes get their centre.
+        let typed = LocationSelection {
+            country: "Germany".to_owned(),
+            mode: LocationMode::PostalCodes,
+            postal_codes: vec!["10115".to_owned()],
+            ..LocationSelection::default()
+        };
+        assert!(typed.places()[0].center.is_some());
+    }
+
 
     #[test]
     fn search_config_expands_queries_and_locations() {

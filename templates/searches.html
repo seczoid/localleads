@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Searches{% endblock %}
+{% block heading %}<h1>Searches</h1>{% endblock %}
+{% block sub %}{% include "partials/home_sub.html" %}{% endblock %}
+{% block actions %}<a class="btn" href="/leads/export.csv" hx-boost="false">Export all leads</a>{% endblock %}
+{% block content %}
+<div id="home-live" hx-get="/partials/searches" hx-trigger="jobs-changed from:body throttle:2s, leads-changed from:body, proxies-changed from:body throttle:5s" hx-swap="innerHTML">
+  {{ body|safe }}
+</div>
+{% endblock %}

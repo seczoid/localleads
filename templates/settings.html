@@ -1,82 +1,119 @@
 {% extends "base.html" %}
 {% block title %}Settings{% endblock %}
 {% block heading %}<h1>Settings</h1>{% endblock %}
+{% block sub %}<p class="page-sub">LocalLeads {{ version }}<span class="sep">·</span>{{ stats.leads }} leads in {{ db_size }}</p>{% endblock %}
 {% block content %}
-<div class="grid-2 align-start">
-  <section class="card">
-    <header class="card-head"><h2>Database</h2></header>
-    <dl class="kv">
-      <dt>File</dt><dd class="mono break">{{ db_path }}</dd>
-      <dt>Size</dt><dd>{{ db_size }}</dd>
-      <dt>Contents</dt><dd>{{ stats.jobs }} jobs · {{ stats.leads }} leads · {{ stats.proxies }} proxies</dd>
-      <dt>Exports folder</dt><dd class="mono break">{{ data_dir }}</dd>
-      <dt>Version</dt><dd>LocalLeads {{ version }}</dd>
-    </dl>
-    <p class="hint">The database holds searches, leads, proxy health history, and the proxy credentials needed to use them. Keep the file private.</p>
+<div class="settings">
+  <section class="set-row" id="account">
+    <div class="set-label">
+      <h2>Account</h2>
+      <p>There is one account per database. There's no password reset: if you forget the password, you'll need to start over with a new database.</p>
+    </div>
+    <div class="set-body">
+      <p class="set-value">Signed in as <b class="break">{{ email }}</b></p>
+      <form method="post" action="/logout" hx-boost="false"><button class="btn">Sign out</button></form>
+    </div>
   </section>
 
-  <section class="card">
-    <header class="card-head"><h2>Backup and restore</h2></header>
-    <a class="btn primary" href="/settings/backup.sqlite" hx-boost="false">Download a backup</a>
-    <form hx-post="/settings/backup" class="stack">
-      <label class="field">
-        <span>Or write a backup to a path on this machine</span>
-        <input name="path" placeholder="{{ default_backup }}">
-      </label>
-      <button class="btn">Write backup</button>
-    </form>
-    <p class="hint">To restore, stop the server and start it with:</p>
-    <pre class="code">localleads --db "{{ db_path }}" --restore /path/to/backup.sqlite</pre>
-  </section>
-</div>
-
-<div class="grid-2 align-start">
-  <section class="card" id="account">
-    <header class="card-head"><h2>Account</h2></header>
-    <dl class="kv">
-      <dt>Signed in as</dt><dd class="break">{{ email }}</dd>
-    </dl>
-    <form method="post" action="/logout" hx-boost="false" class="stack">
-      <button class="btn">Sign out</button>
-    </form>
-    <p class="hint">There is one account per database. There's no password reset: if you forget the password, you'll need to start over with a new database.</p>
-  </section>
-
-  <section class="card">
-    <header class="card-head"><h2>Change password</h2></header>
-    <form hx-post="/account/password" class="stack" hx-on::after-request="if (event.detail.successful) this.reset()">
-      <label class="field">
-        <span>Current password</span>
-        <input type="password" name="current" autocomplete="current-password" required>
-      </label>
-      <label class="field">
-        <span>New password</span>
-        <input type="password" name="password" autocomplete="new-password" minlength="8" required>
-      </label>
-      <label class="field">
-        <span>Confirm new password</span>
-        <input type="password" name="confirm" autocomplete="new-password" minlength="8" required>
-      </label>
+  <section class="set-row">
+    <div class="set-label">
+      <h2>Password</h2>
+      <p>Changing it signs out every other browser. API keys keep working.</p>
+    </div>
+    <form class="set-body" hx-post="/account/password" hx-on::after-request="if (event.detail.successful) this.reset()">
+      <label class="field"><span>Current password</span><input type="password" name="current" autocomplete="current-password" required></label>
+      <label class="field"><span>New password <em>8 characters or more</em></span><input type="password" name="password" autocomplete="new-password" minlength="8" required></label>
+      <label class="field"><span>Confirm new password</span><input type="password" name="confirm" autocomplete="new-password" minlength="8" required></label>
       <button class="btn primary">Change password</button>
     </form>
-    <p class="hint">Changing it signs out every other browser. API keys keep working.</p>
+  </section>
+
+  <section class="set-row">
+    <div class="set-label">
+      <h2>Backup</h2>
+      <p>A backup is one file holding every search, lead and proxy. Keep it private: it includes your proxy credentials.</p>
+    </div>
+    <div class="set-body">
+      <a class="btn primary" href="/settings/backup.sqlite" hx-boost="false">Download a backup</a>
+      <form hx-post="/settings/backup" class="set-inline">
+        <label class="field"><span>Or save one to a folder on this machine</span><input name="path" placeholder="{{ default_backup }}"></label>
+        <button class="btn">Save backup</button>
+      </form>
+      <details class="disclosure">
+        <summary>How to restore a backup</summary>
+        <p class="hint">Stop LocalLeads, then start it once with this command. It replaces the current database with the backup.</p>
+        <pre class="code">localleads --db "{{ db_path }}" --restore /path/to/backup.sqlite</pre>
+      </details>
+    </div>
+  </section>
+
+  <section class="set-row">
+    <div class="set-label">
+      <h2>Storage</h2>
+      <p>Everything stays in one database file on this machine.</p>
+    </div>
+    <div class="set-body">
+      <dl class="kv">
+        <dt>Database</dt><dd class="mono break">{{ db_path }}</dd>
+        <dt>Size</dt><dd>{{ db_size }}</dd>
+        <dt>Holds</dt><dd>{{ stats.jobs }} searches · {{ stats.leads }} leads · {{ stats.proxies }} proxies</dd>
+        <dt>Exports go to</dt><dd class="mono break">{{ data_dir }}</dd>
+      </dl>
+    </div>
+  </section>
+
+  <section class="set-row" id="notifications" x-data="finishAlerts">
+    <div class="set-label">
+      <h2>Notifications</h2>
+      <p>Get a system notification when a search finishes, fails or is stopped while this tab is in the background. Set for this browser only.</p>
+    </div>
+    <div class="set-body">
+      <template x-if="state === 'unsupported'">
+        <p class="set-value muted">This browser can't show notifications.</p>
+      </template>
+      <template x-if="state === 'insecure'">
+        <p class="set-value muted">Browsers only allow notifications over HTTPS or on localhost. Open LocalLeads through a secure address to turn them on.</p>
+      </template>
+      <template x-if="state === 'denied'">
+        <p class="set-value muted">Notifications are blocked for this site. Allow them in the browser's site settings, then reload this page.</p>
+      </template>
+      <template x-if="state === 'default'">
+        <button type="button" class="btn primary" @click="allow()">Turn on notifications</button>
+      </template>
+      <template x-if="state === 'granted'">
+        <div class="set-inline notify-row">
+          <label class="check"><input type="checkbox" :checked="on" @change="set($event.target.checked)"> Notify me when a search ends</label>
+          <button type="button" class="btn" @click="test()" :disabled="!on">Send a test</button>
+        </div>
+      </template>
+    </div>
+  </section>
+
+  <section class="set-row" id="activity">
+    <div class="set-label">
+      <h2>Activity</h2>
+      <p>Notices from LocalLeads since it last started. The <a href="/system">System page</a> has the full server log.</p>
+    </div>
+    <div class="set-body">
+      {% if notices.is_empty() %}
+      <p class="muted">Nothing yet.</p>
+      {% else %}
+      <ul class="activity">
+        {% for notice in notices %}<li class="{{ notice.level }}"><time>{{ notice.at }}</time><span>{{ notice.message }}</span></li>{% endfor %}
+      </ul>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="set-row">
+    <div class="set-label">
+      <h2>About scraping</h2>
+      <p>How LocalLeads gets its data, and the JSON API.</p>
+    </div>
+    <div class="set-body">
+      <p class="set-text">LocalLeads reads Google Maps web responses directly; no API key is needed. Google can change the response format, ask for consent, rate-limit, or restrict access. Those responses are reported as search failures and are never bypassed. Collect data in line with applicable law and Google's access policies.</p>
+      <p class="hint">JSON API: <code>/api/stats</code>, <code>/api/jobs</code>, <code>/api/jobs/&lt;id&gt;</code>, <code>/api/leads?q=&amp;source=&amp;limit=&amp;offset=</code></p>
+    </div>
   </section>
 </div>
-
-<section class="card" id="activity">
-  <header class="card-head"><h2>Activity since the server started</h2></header>
-  {% if notices.is_empty() %}
-    <div class="empty"><p>Nothing yet.</p></div>
-  {% else %}
-  <ul class="activity">
-    {% for notice in notices %}<li class="{{ notice.level }}"><time>{{ notice.at }}</time><span>{{ notice.message }}</span></li>{% endfor %}
-  </ul>
-  {% endif %}
-</section>
-
-<section class="card">
-  <header class="card-head"><h2>About scraping</h2></header>
-  <p>LocalLeads reads Google Maps web responses directly; no API key is needed. Google can change the response format, ask for consent, rate-limit, or restrict access. Those responses are reported as search failures and are never bypassed. Collect data in line with applicable law and Google's access policies.</p>
-  <p class="hint">JSON API: <code>/api/stats</code>, <code>/api/jobs</code>, <code>/api/jobs/&lt;id&gt;</code>, <code>/api/leads?q=&amp;source=&amp;limit=&amp;offset=</code></p>
-</section>
 {% endblock %}

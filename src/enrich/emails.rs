@@ -44,12 +44,15 @@ fn re(pattern: &str) -> Regex {
     Regex::new(pattern).expect("valid regex")
 }
 
-/// An address: RFC 5322 dot-atom local part, a domain of LDH labels and an
-/// alphabetic top-level domain.
+/// An address: a local part of the characters real mailboxes use (letters,
+/// digits, `_ % + -`, dot-separated), a domain of LDH labels and an
+/// alphabetic top-level domain. RFC 5322 also allows `/ | = ? '` and more,
+/// but on web pages those come from URLs glued to an address
+/// (`//formsubmit.co/info@acme.com`, `?cc=info@acme.com`), not from mailboxes.
 fn email_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        re(r"(?i)[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:xn--[a-z0-9-]{2,59}|[a-z]{2,24})")
+        re(r"(?i)[a-z0-9_%+-]+(?:\.[a-z0-9_%+-]+)*@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:xn--[a-z0-9-]{2,59}|[a-z]{2,24})")
     })
 }
 
@@ -107,10 +110,18 @@ fn mailto_addresses(html: &str) -> Vec<String> {
     for capture in re.captures_iter(html) {
         let target = decode_entities(&capture[1]);
         let target = percent_decode(&target);
-        let target = target.split('?').next().unwrap_or_default();
-        for part in target.split([',', ';']) {
-            if let Some(found) = email_re().find(part.trim()) {
-                out.push(found.as_str().to_owned());
+        let (to, query) = target.split_once('?').unwrap_or((&target, ""));
+        // `mailto:a@x.com?cc=b@x.com` and `mailto:?to=a@x.com` carry
+        // addresses in the query too.
+        let extra = query.split('&').filter_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            matches!(key.to_ascii_lowercase().as_str(), "to" | "cc" | "bcc").then_some(value)
+        });
+        for list in std::iter::once(to).chain(extra) {
+            for part in list.split([',', ';']) {
+                if let Some(found) = email_re().find(part.trim()) {
+                    out.push(found.as_str().to_owned());
+                }
             }
         }
     }
@@ -604,6 +615,27 @@ mod tests {
             https://8f2a3b4c5d6e7f8091a2b3c4d5e6f708@o12345.ingest.sentry.io/1
             <script src="lib@1.2.3/dist.js"></script> real@acme.com"#;
         assert_eq!(emails(html), vec!["real@acme.com"]);
+    }
+
+    #[test]
+    fn urls_next_to_an_address_stay_off_it() {
+        let html = r#"<form action="//formsubmit.co/support@hoodguyz.com"></form>
+            <a href="https://mail.google.com/mail/?view=cm&fs=1&to=custserv@swiftclean.com">Mail</a>
+            <p>www.anamegda.com|anapbm@gmail.com</p>
+            <a href="https://www.threads.net/@linktr.ee">Threads</a>
+            <a href="mailto:?cc=mishell@craftmasters.com">Write</a>
+            <a href="mailto:office@acme.com?bcc=books@acme.com&subject=Hi">Office</a>"#;
+        assert_eq!(
+            emails(html),
+            vec![
+                "books@acme.com",
+                "mishell@craftmasters.com",
+                "office@acme.com",
+                "anapbm@gmail.com",
+                "custserv@swiftclean.com",
+                "support@hoodguyz.com",
+            ]
+        );
     }
 
     #[test]

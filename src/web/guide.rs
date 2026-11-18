@@ -69,6 +69,7 @@ struct DocsPage {
     nav: &'static str,
     install: String,
     can_verify: bool,
+    tool_count: usize,
 }
 
 /// The dashboard's own address: the public URL when one is set, otherwise
@@ -228,5 +229,6 @@ pub async fn docs(State(state): State<SharedState>) -> WebResult {
         nav: "docs",
         install: install_command(&exe, &args),
         can_verify: cfg!(feature = "verify"),
+        tool_count: crate::mcp::tool_count(),
     })
 }

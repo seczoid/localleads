@@ -540,7 +540,7 @@ async fn store_results(
         let saved =
             tokio::task::spawn_blocking(move || db.record_proxy_checks(&endpoint, &records)).await;
         if let Ok(Err(error)) | Err(error) = saved.map_err(anyhow::Error::from) {
-            eprintln!("failed to store proxy check results: {error:#}");
+            crate::serverlog::error!("Couldn't store proxy check results: {error:#}");
         }
         let _ = events.send(AppEvent::ProxyChecksStored {
             healthy,

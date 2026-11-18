@@ -5,7 +5,7 @@
 
 use super::{LocalLeadsMcp, ToolResult, blocking, fail, page_limit, reply};
 use crate::db::{FacetCount, LeadQuery, WebsiteFilter};
-use crate::export::{csv_bytes, export_records_to_disk, json_bytes};
+use crate::export::{CsvLayout, csv_bytes_as, json_bytes};
 use crate::web::views::{EnrichView, percent, place_label};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
@@ -213,9 +213,23 @@ pub enum ExportFormat {
 pub struct ExportLeadsParams {
     #[serde(flatten)]
     pub filters: LeadFilterInput,
-    /// csv (default; the full 120-column schema), json, or both.
+    /// csv (default), json, or both.
     #[serde(default)]
     pub format: ExportFormat,
+    /// CSV layout: "clean" (default: one row per business, 28 readable
+    /// columns such as Name, Phone, Email, Email status, Hours) or
+    /// "outscraper" (every Outscraper-style column, one row per email).
+    #[serde(default)]
+    pub csv_style: Option<String>,
+    /// CSV columns to keep, in the layout's own order; empty keeps them all.
+    /// Clean ids: name, category, phone, other_phones, email, email_status,
+    /// other_emails, website, maps_url, address, city, state, postal_code,
+    /// country, rating, reviews, hours, claimed, facebook, instagram,
+    /// linkedin, x, youtube, description, search_term, latitude, longitude,
+    /// place_id. Outscraper columns use their own names (see
+    /// search_options output_fields).
+    #[serde(default)]
+    pub columns: Vec<String>,
     /// Row order, same keys as browse_leads. Default: newest first.
     #[serde(default)]
     pub sort: Option<String>,
@@ -404,7 +418,7 @@ impl LocalLeadsMcp {
     }
 
     #[tool(
-        description = "Facet counts for the browse page: how many leads match per search, category, state and city, plus has-phone, website and rating buckets. Each facet is counted with the other filters applied (its own selection left out), exactly like the dashboard. Use the returned values as browse_leads filters.",
+        description = "Facet counts for the browse page: how many leads match per search, category, state and city, plus has-phone, website, email (has / safe / none / pending; pending is what enrichment still has to do) and rating buckets. Each facet is counted with the other filters applied (its own selection left out), exactly like the dashboard. Use the returned values as browse_leads filters.",
         annotations(read_only_hint = true)
     )]
     async fn lead_facets(&self, Parameters(params): Parameters<LeadFacetsParams>) -> ToolResult {
@@ -571,17 +585,17 @@ impl LocalLeadsMcp {
     }
 
     #[tool(
-        description = "Permanently delete leads from every search's list, like the leads table's bulk Delete: pass ids (up to 1000), or all_matching=true with browse filters to delete every matching lead (every lead when no filter is set). Cannot be undone; confirm with the user and check the count with browse_leads first.",
+        description = "Delete leads from every search's list, like the leads table's bulk Delete: pass ids (up to 1000), or all_matching=true with browse filters to delete every matching lead (every lead when no filter is set). Confirm with the user and check the count with browse_leads first. Returns an undo_id: undo_delete brings them back within 60 minutes.",
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true)
     )]
     async fn delete_leads(&self, Parameters(params): Parameters<LeadSelectionParams>) -> ToolResult {
         let query = params.query()?;
         let requested = query.ids.len();
         let state = self.state.clone();
-        let (matched, removed) = blocking(move || {
+        let (matched, removed, undo) = blocking(move || {
             let ids = state.db.lead_ids(&query)?;
             let removed = state.db.delete_leads(&ids)?;
-            Ok((ids.len(), removed))
+            Ok((ids.len(), removed.count, removed.undo))
         })
         .await?;
         self.state.mark_jobs_dirty();
@@ -591,7 +605,7 @@ impl LocalLeadsMcp {
                 format!("Deleted {removed} {}", if removed == 1 { "lead" } else { "leads" }),
             );
         }
-        let mut value = json!({ "matched": matched, "deleted": removed });
+        let mut value = json!({ "matched": matched, "deleted": removed, "undo_id": super::undo_id(removed, undo) });
         if !params.all_matching {
             value["requested"] = json!(requested);
         }
@@ -627,7 +641,7 @@ impl LocalLeadsMcp {
     }
 
     #[tool(
-        description = "Export leads as CSV (the full 120-column schema), JSON, or both: everything matching the browse filters, or a hand-picked selection with ids (the leads table's bulk Export). Writes files to disk (default: beside the database, named after the search) and returns their paths, or returns small exports (up to 1000 leads) inline.",
+        description = "Export leads as CSV (clean by default: one row per business with readable columns; csv_style=outscraper for every Outscraper-style column), JSON, or both: everything matching the browse filters, or a hand-picked selection with ids (the leads table's bulk Export). Writes files to disk (default: beside the database, named after the search) and returns their paths, or returns small exports (up to 1000 leads) inline.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn export_leads(&self, Parameters(params): Parameters<ExportLeadsParams>) -> ToolResult {
@@ -637,6 +651,7 @@ impl LocalLeadsMcp {
         let query = params
             .filters
             .query(params.sort.as_deref().unwrap_or("").trim(), 0, 0);
+        let layout = CsvLayout::pick(params.csv_style.as_deref().unwrap_or_default(), &params.columns.join(","));
         if params.inline {
             if matches!(params.format, ExportFormat::Both) {
                 return Err("inline exports take one format: csv or json".to_owned());
@@ -656,7 +671,7 @@ impl LocalLeadsMcp {
         if params.inline {
             let bytes = match params.format {
                 ExportFormat::Json => json_bytes(&records),
-                _ => csv_bytes(&records),
+                _ => csv_bytes_as(&records, &layout),
             }
             .map_err(fail)?;
             if bytes.len() > INLINE_EXPORT_MAX_BYTES {
@@ -692,14 +707,14 @@ impl LocalLeadsMcp {
             match format {
                 ExportFormat::Both => {
                     let stem = target.with_extension("");
-                    export_records_to_disk(&records, &stem)?;
+                    crate::export::export_records_to_disk(&records, &stem, &layout)?;
                     Ok(vec![stem.with_extension("csv"), stem.with_extension("json")])
                 }
                 ExportFormat::Csv | ExportFormat::Json => {
                     let (extension, bytes) = if matches!(format, ExportFormat::Json) {
                         ("json", json_bytes(&records)?)
                     } else {
-                        ("csv", csv_bytes(&records)?)
+                        ("csv", csv_bytes_as(&records, &layout)?)
                     };
                     let path = if target.extension().is_some() {
                         target

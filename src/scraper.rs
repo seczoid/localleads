@@ -26,6 +26,9 @@ const MAX_PAGES: u32 = 15;
 pub struct JobControl {
     paused: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
+    /// Stopped only for a restart: the search keeps its status and is
+    /// picked up again when the app is back.
+    suspended: Arc<AtomicBool>,
 }
 
 impl JobControl {
@@ -33,7 +36,18 @@ impl JobControl {
         Self {
             paused: Arc::new(AtomicBool::new(false)),
             cancelled: Arc::new(AtomicBool::new(false)),
+            suspended: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Winds the search down for a restart without ending it.
+    pub fn suspend(&self) {
+        self.suspended.store(true, Ordering::Relaxed);
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_suspended(&self) -> bool {
+        self.suspended.load(Ordering::Relaxed)
     }
 
     pub fn toggle_pause(&self) -> bool {
@@ -44,6 +58,10 @@ impl JobControl {
 
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -160,7 +178,7 @@ fn bootstrap_url(search_text: &str, config: &SearchConfig) -> Result<Url> {
         query.append_pair("authuser", "0");
         query.append_pair("hl", language(config));
         if let Some(region) = region(config) {
-            query.append_pair("gl", region);
+            query.append_pair("gl", &region);
         }
         query.append_pair("q", search_text);
     }
@@ -185,7 +203,7 @@ fn map_url(
         query.append_pair("authuser", "0");
         query.append_pair("hl", language(config));
         if let Some(region) = region(config) {
-            query.append_pair("gl", region);
+            query.append_pair("gl", &region);
         }
         query.append_pair("q", search_text);
         query.append_pair("pb", &payload);
@@ -203,15 +221,16 @@ pub(crate) fn language(config: &SearchConfig) -> &str {
 
 /// Google's `gl` region. Searches saved without one use their country's,
 /// since Google returns far fewer results without it.
-pub(crate) fn region(config: &SearchConfig) -> Option<&str> {
+pub(crate) fn region(config: &SearchConfig) -> Option<std::borrow::Cow<'_, str>> {
     let value = config.region.trim();
     if !value.is_empty() && value.len() <= 3 {
-        return Some(value);
+        return Some(value.into());
     }
     config
         .location_selection
         .as_ref()
         .and_then(|selection| crate::models::country_region(&selection.country))
+        .map(Into::into)
 }
 
 fn search_text(query: &str, location: &str, config: &SearchConfig) -> String {
@@ -702,6 +721,8 @@ struct Tally {
     with_email: AtomicI64,
     /// Read leads waiting for their emails to be checked.
     checking: AtomicI64,
+    /// Results left out because they lay far from the area searched.
+    out_of_area: AtomicI64,
 }
 
 /// Everything a lookup needs, shared across the search.
@@ -717,6 +738,10 @@ struct Run<'a> {
     tally: Tally,
     total_lookups: usize,
     enriching: bool,
+    /// Areas finished since progress was last saved.
+    finished: Mutex<Vec<String>>,
+    /// Google Maps is done and websites are being read.
+    reading_sites: AtomicBool,
 }
 
 impl Run<'_> {
@@ -725,6 +750,13 @@ impl Run<'_> {
     }
 
     fn save_progress(&self) -> Result<()> {
+        let finished = std::mem::take(
+            &mut *self
+                .finished
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        self.database.mark_lookups_done(self.job_id, &finished)?;
         self.database.update_job_progress(
             self.job_id,
             self.tally.collected.load(Ordering::Relaxed),
@@ -740,7 +772,7 @@ impl Run<'_> {
             fmt_number(i64::try_from(self.total_lookups).unwrap_or(i64::MAX)),
             fmt_number(self.tally.collected.load(Ordering::Relaxed)),
         );
-        if self.enriching {
+        if self.enriching && self.reading_sites.load(Ordering::Relaxed) {
             text.push_str(&format!(
                 " · {} enriched · {} with email",
                 fmt_number(self.tally.enriched.load(Ordering::Relaxed)),
@@ -753,6 +785,24 @@ impl Run<'_> {
         }
         text
     }
+
+    fn live(&self) -> crate::events::LiveProgress {
+        crate::events::LiveProgress {
+            lookups_done: self.tally.lookups_done.load(Ordering::Relaxed),
+            total_lookups: i64::try_from(self.total_lookups).unwrap_or(i64::MAX),
+            checking: self.tally.checking.load(Ordering::Relaxed),
+            reading_sites: self.reading_sites.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Names one area of a search, so a resumed search knows which are done.
+fn lookup_key(lookup: &Lookup) -> String {
+    let center = lookup
+        .center
+        .map(|(latitude, longitude)| format!("{latitude:.5},{longitude:.5}"))
+        .unwrap_or_default();
+    format!("{}\u{1f}{}\u{1f}{center}", lookup.query, lookup.location)
 }
 
 fn fmt_number(value: i64) -> String {
@@ -774,8 +824,21 @@ pub async fn run_job(
     pool: ProxyPool,
     control: JobControl,
     events: tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    resumed: bool,
 ) {
-    let result = run_job_inner(&database, &job_id, &config, &pool, &control, &events).await;
+    let result =
+        run_job_inner(&database, &job_id, &config, &pool, &control, &events, resumed).await;
+    if control.is_suspended() {
+        // The status stays as it is, so the search carries on after the
+        // restart from the areas it already finished.
+        let _ = database.append_event(
+            &job_id,
+            "info",
+            "Paused for a restart; carries on when LocalLeads is back",
+        );
+        let _ = events.send(AppEvent::JobSuspended { job_id });
+        return;
+    }
     match result {
         Ok(()) if control.is_cancelled() => {
             let _ =
@@ -814,23 +877,62 @@ async fn run_job_inner(
     pool: &ProxyPool,
     control: &JobControl,
     events: &tokio::sync::mpsc::UnboundedSender<AppEvent>,
+    resumed: bool,
 ) -> Result<()> {
     config.validate()?;
-    database.update_job_status(job_id, JobStatus::Running, None)?;
+    database.claim_job_runner(job_id)?;
+    database.update_job_status(
+        job_id,
+        if control.is_paused() { JobStatus::Paused } else { JobStatus::Running },
+        None,
+    )?;
     let lookups = config.lookups();
+    let total_lookups = lookups.len();
     let concurrency = usize::try_from(config.concurrency).unwrap_or(1).clamp(
         1,
         usize::try_from(crate::models::MAX_CONCURRENCY).unwrap_or(500),
     );
-    database.append_event(
-        job_id,
-        "info",
-        &format!(
-            "Search started: {} areas, {} at a time",
-            fmt_number(i64::try_from(lookups.len()).unwrap_or(i64::MAX)),
-            concurrency
-        ),
-    )?;
+
+    // A search picked up again keeps what it had: the areas it finished
+    // are skipped and its counts carry on from where they were.
+    let done = database.done_lookups(job_id)?;
+    let lookups: Vec<Lookup> = lookups
+        .into_iter()
+        .filter(|lookup| !done.contains(&lookup_key(lookup)))
+        .collect();
+    let tally = Tally::default();
+    let mut collected = 0;
+    if resumed {
+        collected = database.job_lead_count(job_id)?;
+        let job = database.get_job(job_id)?;
+        tally.collected.store(collected, Ordering::Relaxed);
+        tally.failures.store(job.as_ref().map_or(0, |job| job.failures), Ordering::Relaxed);
+        tally.duplicates.store(job.as_ref().map_or(0, |job| job.duplicates), Ordering::Relaxed);
+        tally.lookups_done.store(
+            i64::try_from(total_lookups - lookups.len()).unwrap_or(0),
+            Ordering::Relaxed,
+        );
+        database.append_event(
+            job_id,
+            "info",
+            &format!(
+                "Picked up where it left off: {} of {} areas were already searched, {} leads kept",
+                fmt_number(i64::try_from(total_lookups - lookups.len()).unwrap_or(0)),
+                fmt_number(i64::try_from(total_lookups).unwrap_or(i64::MAX)),
+                fmt_number(collected),
+            ),
+        )?;
+    } else {
+        database.append_event(
+            job_id,
+            "info",
+            &format!(
+                "Search started: {} areas, {} at a time",
+                fmt_number(i64::try_from(total_lookups).unwrap_or(i64::MAX)),
+                concurrency
+            ),
+        )?;
+    }
     let run = Run {
         database,
         job_id,
@@ -845,27 +947,14 @@ async fn run_job_inner(
             } else {
                 i64::from(config.total_limit)
             },
-            reserved: AtomicI64::new(0),
+            reserved: AtomicI64::new(collected),
         },
-        tally: Tally::default(),
-        total_lookups: lookups.len(),
+        tally,
+        total_lookups,
         enriching: config.enriches(),
+        finished: Mutex::new(Vec::new()),
+        reading_sites: AtomicBool::new(false),
     };
-    let enricher = if config.enriches() {
-        match crate::enrich::run::Enricher::new(config, pool.clone()).await {
-            Ok(enricher) => {
-                database.append_event(job_id, "info", &enricher.describe())?;
-                Some(enricher)
-            }
-            Err(error) => {
-                database.append_event(job_id, "error", &format!("Enrichment is off: {error}"))?;
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let scraping_done = AtomicBool::new(false);
 
     // Progress is saved and pushed to the UI once a second rather than per
     // lead, however many lookups run at once.
@@ -881,87 +970,124 @@ async fn run_job_inner(
                 let _ = run.events.send(AppEvent::JobProgress {
                     job_id: run.job_id.to_owned(),
                     message: activity.clone(),
+                    live: run.live(),
                 });
                 last = activity;
             }
         }
     };
-    let scrape = async {
-        let result = stream::iter(lookups)
+    // Google Maps first, then the websites: both at once fight over the
+    // same connections and slow each other down.
+    let work = async {
+        stream::iter(lookups)
             .map(|lookup| collect_lookup(&run, lookup))
             .buffer_unordered(concurrency)
             .try_for_each(|()| async { Ok(()) })
-            .await;
-        scraping_done.store(true, Ordering::Relaxed);
+            .await?;
+        run.save_progress()?;
+        let out_of_area = run.tally.out_of_area.load(Ordering::Relaxed);
+        if out_of_area > 0 {
+            database.append_event(
+                job_id,
+                "info",
+                &format!(
+                    "Left out {} results that lay far from the areas searched",
+                    fmt_number(out_of_area)
+                ),
+            )?;
+        }
+        if !run.enriching || control.is_cancelled() {
+            return Ok(());
+        }
+        let enricher = match crate::enrich::run::Enricher::new(config, pool.clone()).await {
+            Ok(enricher) => enricher,
+            Err(error) => {
+                database.append_event(job_id, "error", &format!("Enrichment is off: {error}"))?;
+                return Ok(());
+            }
+        };
+        database.append_event(
+            job_id,
+            "info",
+            &format!(
+                "Google Maps done with {} leads. {}, {} at a time",
+                fmt_number(run.tally.collected.load(Ordering::Relaxed)),
+                enricher.describe(),
+                concurrency
+            ),
+        )?;
+        run.reading_sites.store(true, Ordering::Relaxed);
+        let result = enrich_leads(&run, &enricher, concurrency).boxed().await;
+        let _ = database.release_job_enrichment(job_id);
         result
     };
-    let enrich = async {
-        match &enricher {
-            Some(enricher) => enrich_leads(&run, enricher, &scraping_done, concurrency).boxed().await,
-            None => Ok(()),
-        }
-    };
     tokio::pin!(report);
-    let result = tokio::select! {
-        result = async { tokio::try_join!(scrape, enrich) } => result.map(|_| ()),
+    let result: Result<()> = tokio::select! {
+        result = work => result,
         () = &mut report => Ok(()),
     };
-    if enricher.is_some() {
-        let _ = database.release_job_enrichment(job_id);
-    }
     result?;
     run.save_progress()?;
     let _ = events.send(AppEvent::JobProgress {
         job_id: job_id.to_owned(),
         message: run.activity(),
+        live: run.live(),
     });
     Ok(())
 }
 
-/// Reads every page of one lookup and saves the matching leads.
-/// Enriches the search's leads as they come in, until the search is done
-/// and none are left.
-/// Leads read at once: each fetches a few pages of its website and maybe
-/// Google's place page (those are held to the search's concurrency).
-const READS_AT_ONCE: usize = 64;
-/// Leads whose emails are checked at once; the enricher bounds the
-/// mail-server checks themselves.
-const CHECK_LEADS_AT_ONCE: usize = 64;
+/// Enriches the search's leads once Google Maps is done, as many at once
+/// as the search itself ran.
+/// Mail-server checks run apart from reading, so slow mail servers never
+/// hold up the websites; the enricher bounds the checks themselves.
+const CHECK_LEADS_AT_ONCE: usize = 256;
 
 async fn enrich_leads(
     run: &Run<'_>,
     enricher: &crate::enrich::run::Enricher,
-    scraping_done: &AtomicBool,
     concurrency: usize,
 ) -> Result<()> {
-    let targets = stream::unfold(Vec::new(), |mut queue: Vec<crate::db::EnrichTarget>| async move {
-        loop {
-            run.control.wait_if_paused().await;
-            if run.control.is_cancelled() {
-                return None;
-            }
-            if let Some(target) = queue.pop() {
-                return Some((target, queue));
-            }
-            let finished = scraping_done.load(Ordering::Relaxed);
-            let database = run.database.clone();
-            let job_id = run.job_id.to_owned();
-            let claimed = tokio::task::spawn_blocking(move || database.claim_enrich_targets(&job_id, 100))
+    // Claims walk the list in id order from a cursor, so each claim reads
+    // only new rows however long the list is. A last pass from the start
+    // picks up leads handed back while the walk went on.
+    let batch = (concurrency * 2).max(200);
+    let targets = stream::unfold(
+        (Vec::new(), String::new(), false),
+        move |(mut queue, mut after, mut last_pass): (Vec<crate::db::EnrichTarget>, String, bool)| async move {
+            loop {
+                run.control.wait_if_paused().await;
+                if run.control.is_cancelled() {
+                    return None;
+                }
+                if let Some(target) = queue.pop() {
+                    return Some((target, (queue, after, last_pass)));
+                }
+                let database = run.database.clone();
+                let job_id = run.job_id.to_owned();
+                let from = after.clone();
+                let claimed = tokio::task::spawn_blocking(move || {
+                    database.claim_enrich_targets(&job_id, &from, batch)
+                })
                 .await
                 .ok()
                 .and_then(Result::ok)
                 .unwrap_or_default();
-            if claimed.is_empty() {
-                if finished {
-                    return None;
+                if claimed.is_empty() {
+                    if last_pass {
+                        return None;
+                    }
+                    last_pass = true;
+                    after.clear();
+                    continue;
                 }
-                tokio::time::sleep(Duration::from_millis(1500)).await;
-                continue;
+                if let Some(last) = claimed.iter().map(|target| &target.id).max() {
+                    after.clone_from(last);
+                }
+                queue = claimed;
+                queue.reverse();
             }
-            queue = claimed;
-            queue.reverse();
-        }
-    })
+        },
+    )
     .boxed();
 
     // Two stages, so slow mail servers never hold up website reading:
@@ -984,11 +1110,10 @@ async fn enrich_leads(
                     let (patch, summary) = reading.result();
                     let has_email = summary.email_count > 0;
                     let check = enricher.needs_check(&reading);
-                    let database = run.database.clone();
-                    let id = target.id.clone();
-                    tokio::task::spawn_blocking(move || database.save_enrichment(&id, &patch, &summary))
+                    run.database
+                        .save_enrichment_async(target.id.clone(), patch, summary)
                         .await
-                        .context("save enrichment")??;
+                        .context("save enrichment")?;
                     run.tally.enriched.fetch_add(1, Ordering::Relaxed);
                     if check {
                         run.tally.checking.fetch_add(1, Ordering::Relaxed);
@@ -1000,7 +1125,7 @@ async fn enrich_leads(
                 }
                 .boxed()
             })
-            .buffer_unordered(READS_AT_ONCE.max(concurrency))
+            .buffer_unordered(concurrency)
             .try_collect::<Vec<()>>()
             .await
             .map(|_| ())
@@ -1019,10 +1144,10 @@ async fn enrich_leads(
                     return Ok(());
                 };
                 let has_email = summary.email_count > 0;
-                let database = run.database.clone();
-                tokio::task::spawn_blocking(move || database.save_enrichment(&id, &patch, &summary))
+                run.database
+                    .save_enrichment_async(id, patch, summary)
                     .await
-                    .context("save email checks")??;
+                    .context("save email checks")?;
                 if has_email {
                     run.tally.with_email.fetch_add(1, Ordering::Relaxed);
                 }
@@ -1043,8 +1168,16 @@ async fn wait_cancelled(control: &JobControl) {
 
 async fn collect_lookup(run: &Run<'_>, lookup: Lookup) -> Result<()> {
     let result = collect_lookup_pages(run, &lookup).await;
-    run.tally.lookups_done.fetch_add(1, Ordering::Relaxed);
-    result
+    // An area cut short by a stop or a shutdown is searched again when the
+    // search is picked up; one that ran to its end (or failed) is not.
+    if result.is_ok() && !run.control.is_cancelled() {
+        run.tally.lookups_done.fetch_add(1, Ordering::Relaxed);
+        run.finished
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(lookup_key(&lookup));
+    }
+    result.map(|_| ())
 }
 
 async fn collect_lookup_pages(run: &Run<'_>, lookup: &Lookup) -> Result<()> {
@@ -1057,48 +1190,102 @@ async fn collect_lookup_pages(run: &Run<'_>, lookup: &Lookup) -> Result<()> {
     let mut seen = 0_u32;
     let per_lookup =
         (!config.collect_all && config.per_query_limit > 0).then_some(config.per_query_limit);
-    for page_index in 0..MAX_PAGES {
+    let full_page = usize::try_from(MAP_PAGE_SIZE).unwrap_or(20);
+    let mut page_index = 0;
+    while page_index < MAX_PAGES {
         run.control.wait_if_paused().await;
         if run.control.is_cancelled() || run.limit_reached() {
             return Ok(());
         }
-        let offset = page_index * MAP_PAGE_SIZE;
-        let page = match fetch_with_retries(run, lookup, center, offset).await {
-            Ok(page) => page,
-            Err(error) => {
-                if run.control.is_cancelled() {
+        // Page 1 alone. A full page 1 means the area likely has more, so
+        // pages 2 and 3 are asked for together; later pages one at a time.
+        // Pages are still taken in order, and a short page 2 ends the
+        // lookup as before.
+        let room_for_two = per_lookup.is_none_or(|limit| seen + MAP_PAGE_SIZE < limit);
+        let together = if page_index == 1 && room_for_two { 2 } else { 1 };
+        let together = together.min(MAX_PAGES - page_index);
+        let pages = futures::future::join_all(
+            (page_index..page_index + together)
+                .map(|index| fetch_with_retries(run, lookup, center, index * MAP_PAGE_SIZE)),
+        )
+        .await;
+        for page in pages {
+            page_index += 1;
+            let page = match page {
+                Ok(page) => page,
+                Err(error) => {
+                    if run.control.is_cancelled() {
+                        return Ok(());
+                    }
+                    run.tally.failures.fetch_add(1, Ordering::Relaxed);
+                    let message = format!("{} / {}: {error}", lookup.query, lookup.location);
+                    let _ = run.database.append_event(run.job_id, "error", &message);
                     return Ok(());
                 }
-                run.tally.failures.fetch_add(1, Ordering::Relaxed);
-                let message = format!("{} / {}: {error}", lookup.query, lookup.location);
-                let _ = run.database.append_event(run.job_id, "error", &message);
+            };
+            center = Some(page.center);
+            let rows = page.rows;
+            let mut batch = Vec::with_capacity(page.places.len());
+            let mut nearby = 0_usize;
+            for record in page.places {
+                // An area Google can't place (a PO-box ZIP, say) gets
+                // results from anywhere; those belong to no area searched.
+                if !in_reach(lookup, &record) {
+                    run.tally.out_of_area.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                nearby += 1;
+                if skipped < config.start_at {
+                    skipped += 1;
+                    continue;
+                }
+                if per_lookup.is_some_and(|limit| seen >= limit) {
+                    break;
+                }
+                seen += 1;
+                if matches_filters(&record, &config.filters) {
+                    batch.push(record);
+                }
+            }
+            save_batch(run, lookup, batch).await?;
+            // A full page with nothing near the area: later pages only go
+            // farther out.
+            let strayed = rows > 0 && nearby == 0;
+            if per_lookup.is_some_and(|limit| seen >= limit) || rows < full_page || strayed {
                 return Ok(());
             }
-        };
-        center = Some(page.center);
-        let rows = page.rows;
-        let mut batch = Vec::with_capacity(page.places.len());
-        for record in page.places {
-            if skipped < config.start_at {
-                skipped += 1;
-                continue;
+            if run.control.is_cancelled() || run.limit_reached() {
+                return Ok(());
             }
-            if per_lookup.is_some_and(|limit| seen >= limit) {
-                break;
-            }
-            seen += 1;
-            if matches_filters(&record, &config.filters) {
-                batch.push(record);
-            }
-        }
-        save_batch(run, lookup, batch).await?;
-        if per_lookup.is_some_and(|limit| seen >= limit)
-            || rows < usize::try_from(MAP_PAGE_SIZE).unwrap_or(20)
-        {
-            return Ok(());
         }
     }
     Ok(())
+}
+
+/// How far from an area's centre a result may lie and still count, in
+/// metres: three times the area's span, and never under 25 km.
+fn reach_m(span_m: u32) -> f64 {
+    (f64::from(span_m) * 3.0).max(25_000.0)
+}
+
+/// Whether a result lies near the area the lookup aimed at. A lookup with
+/// no centre, or a result with no coordinates, always counts.
+fn in_reach(lookup: &Lookup, record: &BusinessRecord) -> bool {
+    let (Some(center), Some(latitude), Some(longitude)) =
+        (lookup.center, record.latitude, record.longitude)
+    else {
+        return true;
+    };
+    distance_m(center, (latitude, longitude)) <= reach_m(lookup.span_m)
+}
+
+/// Great-circle distance between two points, in metres.
+fn distance_m((lat1, lon1): (f64, f64), (lat2, lon2): (f64, f64)) -> f64 {
+    let (phi1, phi2) = (lat1.to_radians(), lat2.to_radians());
+    let half_dphi = (phi2 - phi1) / 2.0;
+    let half_dlambda = (lon2 - lon1).to_radians() / 2.0;
+    let a = half_dphi.sin().powi(2) + phi1.cos() * phi2.cos() * half_dlambda.sin().powi(2);
+    2.0 * 6_371_000.0 * a.sqrt().min(1.0).asin()
 }
 
 async fn save_batch(run: &Run<'_>, lookup: &Lookup, mut batch: Vec<BusinessRecord>) -> Result<()> {
@@ -1111,15 +1298,11 @@ async fn save_batch(run: &Run<'_>, lookup: &Lookup, mut batch: Vec<BusinessRecor
         return Ok(());
     }
     let reserved = batch.len();
-    let database = run.database.clone();
-    let job_id = run.job_id.to_owned();
-    let query = lookup.query.clone();
-    let location = lookup.location.clone();
-    let results = tokio::task::spawn_blocking(move || {
-        database.insert_leads(&job_id, &query, &location, &batch)
-    })
-    .await
-    .context("save leads")??;
+    let results = run
+        .database
+        .insert_leads_async(run.job_id, &lookup.query, &lookup.location, &batch)
+        .await
+        .context("save leads")?;
     // A business an earlier search found still joins this search's list;
     // only a repeat within this search counts as a duplicate.
     let added = results
@@ -1332,9 +1515,50 @@ mod tests {
             &record,
             &[
                 "rating>=4".to_owned(),
-                "category contains plumbing".to_owned()
+                "category contains plumb".to_owned()
             ]
         ));
+        assert!(!matches_filters(&record, &["category contains plumbing".to_owned()]));
+    }
+
+    #[test]
+    fn results_far_from_the_area_are_left_out() {
+        let record = |latitude, longitude| BusinessRecord {
+            name: "Dentist".to_owned(),
+            category: None,
+            address: None,
+            phone: None,
+            website: None,
+            latitude,
+            longitude,
+            rating: None,
+            review_count: None,
+            status: None,
+            hours: None,
+            maps_url: None,
+            place_id: None,
+            source: "test".to_owned(),
+            extra: serde_json::json!({}),
+        };
+        // A ZIP in Austin, TX.
+        let zip = Lookup {
+            query: "dentist".to_owned(),
+            location: "78709, TX".to_owned(),
+            center: Some((30.2672, -97.7431)),
+            span_m: 8_000,
+        };
+        assert!(in_reach(&zip, &record(Some(30.3072), Some(-97.7560))), "north Austin");
+        assert!(in_reach(&zip, &record(Some(30.4394), Some(-97.6200))), "Pflugerville, 22 km");
+        assert!(!in_reach(&zip, &record(Some(32.7767), Some(-96.7970))), "Dallas");
+        assert!(!in_reach(&zip, &record(Some(29.7604), Some(-95.3698))), "Houston");
+        assert!(in_reach(&zip, &record(None, None)), "no coordinates");
+        let anywhere = Lookup { center: None, ..zip.clone() };
+        assert!(in_reach(&anywhere, &record(Some(32.7767), Some(-96.7970))));
+        // A region reaches farther than a ZIP.
+        let region = Lookup { span_m: 50_000, ..zip };
+        assert!(in_reach(&region, &record(Some(29.4241), Some(-98.4936))), "San Antonio, 118 km");
+        let km = distance_m((30.2672, -97.7431), (32.7767, -96.7970)) / 1000.0;
+        assert!((km - 295.0).abs() < 3.0, "Austin to Dallas is about 295 km, got {km}");
     }
 
     #[test]

@@ -1,14 +1,14 @@
-use super::views::{EventView, JobView, Opt, config_rows, fmt_count};
-use super::{AppError, WebResult, flag, notify, redirect, render};
+use super::views::{EventView, JobView, Opt, StagesView, config_rows, fmt_count, setup_sentence};
+use super::{AppError, RenderHtml, WebResult, flag, notify, redirect, render};
 use crate::app::SharedState;
 use crate::models::{
-    AreaDepth, COUNTRY_OPTIONS, DEFAULT_OUTPUT_FIELDS, LocationMode, LocationSelection,
+    AreaDepth, DEFAULT_OUTPUT_FIELDS, LocationMode, LocationSelection,
     MAX_CONCURRENCY, SearchConfig, SearchMode, country_region, country_subdivisions, parse_filter,
 };
 use askama::Template;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
-use axum::response::IntoResponse;
+use axum::response::{Html, IntoResponse};
 use axum_extra::extract::Form;
 use serde::Deserialize;
 
@@ -39,64 +39,9 @@ pub const FILTER_OPERATORS: &[&str] = &[
 
 // ------------------------------------------------------------------ list
 
-#[derive(Deserialize, Default)]
-pub struct JobsQuery {
-    #[serde(default)]
-    status: String,
-}
-
-#[derive(Template)]
-#[template(path = "jobs.html")]
-struct JobsPage {
-    nav: &'static str,
-    status_options: Vec<Opt>,
-    jobs: Vec<JobView>,
-}
-
-#[derive(Template)]
-#[template(path = "partials/jobs_table.html")]
-struct JobsTable {
-    jobs: Vec<JobView>,
-}
-
-fn load_jobs(state: &SharedState, status: &str) -> WebResult<Vec<JobView>> {
-    Ok(state
-        .db
-        .list_jobs()?
-        .iter()
-        .filter(|job| match status {
-            "" => true,
-            "active" => job.status.is_active(),
-            other => job.status.to_string() == other,
-        })
-        .map(|job| JobView::new(job, state.is_live(&job.id)))
-        .collect())
-}
-
-pub async fn list(State(state): State<SharedState>, Query(query): Query<JobsQuery>) -> WebResult {
-    let jobs = load_jobs(&state, &query.status)?;
-    let status_options = [
-        ("", "All statuses"),
-        ("active", "Active"),
-        ("completed", "Completed"),
-        ("failed", "Failed"),
-        ("cancelled", "Cancelled"),
-        ("interrupted", "Interrupted"),
-    ]
-    .iter()
-    .map(|(value, label)| Opt::new(*value, *label, &query.status))
-    .collect();
-    render(JobsPage {
-        nav: "jobs",
-        status_options,
-        jobs,
-    })
-}
-
-pub async fn table(State(state): State<SharedState>, Query(query): Query<JobsQuery>) -> WebResult {
-    render(JobsTable {
-        jobs: load_jobs(&state, &query.status)?,
-    })
+/// The searches list moved to the home page; old links land there.
+pub async fn list() -> axum::response::Redirect {
+    axum::response::Redirect::permanent("/")
 }
 
 // ---------------------------------------------------------------- detail
@@ -106,7 +51,8 @@ pub async fn table(State(state): State<SharedState>, Query(query): Query<JobsQue
 struct JobDetailPage {
     nav: &'static str,
     job: JobView,
-    activity: String,
+    stages: StagesView,
+    setup: String,
     config: Vec<(&'static str, String)>,
     events: Vec<EventView>,
 }
@@ -115,7 +61,7 @@ struct JobDetailPage {
 #[template(path = "partials/job_live.html")]
 struct JobLive {
     job: JobView,
-    activity: String,
+    stages: StagesView,
     events: Vec<EventView>,
 }
 
@@ -127,6 +73,17 @@ fn load_job(state: &SharedState, id: &str) -> WebResult<(JobView, crate::models:
     Ok((JobView::new(&job, state.is_live(&job.id)), job))
 }
 
+/// The Google Maps and website progress of one search.
+pub(super) fn job_stages(state: &SharedState, job: &crate::models::JobSummary) -> WebResult<StagesView> {
+    let counts = if job.config.enriches() {
+        state.job_enrich_counts(&job.id)?
+    } else {
+        crate::db::EnrichCounts::default()
+    };
+    let pace = state.job_web_pace(&job.id, counts.read);
+    Ok(StagesView::new(job, state.job_live_progress(&job.id), counts, pace))
+}
+
 pub async fn detail(State(state): State<SharedState>, Path(id): Path<String>) -> WebResult {
     let (job, summary) = load_job(&state, &id)?;
     let events = state
@@ -135,9 +92,19 @@ pub async fn detail(State(state): State<SharedState>, Path(id): Path<String>) ->
         .into_iter()
         .map(EventView::from)
         .collect();
+    let group = match &summary.config.proxy_group_id {
+        Some(group_id) => state
+            .db
+            .list_proxy_groups()?
+            .into_iter()
+            .find(|group| &group.id == group_id)
+            .map(|group| group.name),
+        None => None,
+    };
     render(JobDetailPage {
         nav: "jobs",
-        activity: state.job_activity(&id).unwrap_or_default(),
+        stages: job_stages(&state, &summary)?,
+        setup: setup_sentence(&summary.config, group.as_deref()),
         job,
         config: config_rows(&summary.config),
         events,
@@ -145,18 +112,101 @@ pub async fn detail(State(state): State<SharedState>, Path(id): Path<String>) ->
 }
 
 pub async fn live(State(state): State<SharedState>, Path(id): Path<String>) -> WebResult {
-    let (job, _) = load_job(&state, &id)?;
-    let events = state
+    let html = state.shared_render(&format!("job:{id}"), || {
+        let (job, summary) = load_job(&state, &id)?;
+        let events = state
+            .db
+            .job_event_rows(&id, 200)?
+            .into_iter()
+            .map(EventView::from)
+            .collect();
+        JobLive {
+            stages: job_stages(&state, &summary)?,
+            job,
+            events,
+        }
+        .render_html()
+    })?;
+    Ok(Html(html).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct EventsQuery {
+    #[serde(default)]
+    limit: usize,
+}
+
+/// The newest `limit` events, for reading further back than the live view.
+pub async fn events(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Query(query): Query<EventsQuery>,
+) -> WebResult {
+    load_job(&state, &id)?;
+    let limit = query.limit.clamp(200, 20_000);
+    let total = state.db.job_event_count(&id)?;
+    let events: Vec<EventView> = state
         .db
-        .job_event_rows(&id, 200)?
+        .job_event_rows(&id, limit)?
         .into_iter()
         .map(EventView::from)
         .collect();
-    render(JobLive {
-        activity: state.job_activity(&id).unwrap_or_default(),
-        job,
-        events,
-    })
+    let html = JobEvents { events }.render_html()?;
+    let mut response = Html(html).into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&total.to_string()) {
+        response.headers_mut().insert("x-event-total", value);
+    }
+    Ok(response)
+}
+
+#[derive(Template)]
+#[template(path = "partials/job_events.html")]
+struct JobEvents {
+    events: Vec<EventView>,
+}
+
+#[derive(Deserialize)]
+pub struct LogQuery {
+    #[serde(default)]
+    level: String,
+    #[serde(default)]
+    q: String,
+}
+
+/// The whole log as plain text, oldest first, with the page's filters.
+pub async fn log_txt(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Query(query): Query<LogQuery>,
+) -> WebResult {
+    let (job, _) = load_job(&state, &id)?;
+    let level = query.level.trim().to_ascii_lowercase();
+    let mut text = String::new();
+    for event in state.db.job_events_matching(&id, &level, &query.q)? {
+        let event = EventView::from(event);
+        text.push_str(&format!("{}  {:<5}  {}\n", event.time, event.level.to_uppercase(), event.message));
+    }
+    let name: String = job
+        .name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let name = if name.is_empty() { "search".to_owned() } else { name };
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8".to_owned()),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}-log.txt\""),
+            ),
+        ],
+        text,
+    )
+        .into_response())
 }
 
 // --------------------------------------------------------------- actions
@@ -173,6 +223,13 @@ pub async fn stop(State(state): State<SharedState>, Path(id): Path<String>) -> W
         .stop_job(&id)
         .map_err(|error| AppError::conflict(error.to_string()))?;
     Ok(notify("info", "Stopping search…", &["jobs-changed"]))
+}
+
+pub async fn continue_job(State(state): State<SharedState>, Path(id): Path<String>) -> WebResult {
+    state
+        .continue_job(&id)
+        .map_err(|error| AppError::conflict(error.to_string()))?;
+    Ok(notify("ok", "Carrying on from where it stopped…", &["jobs-changed"]))
 }
 
 pub async fn rerun(
@@ -201,17 +258,23 @@ pub async fn delete(
     if job.active {
         return Err(AppError::conflict("Stop the search before deleting it"));
     }
-    let removed = state.db.delete_job(&id, flag(&query.leads))?;
-    state.notice(
+    let task_state = state.clone();
+    let delete_leads = flag(&query.leads);
+    let removed = tokio::task::spawn_blocking(move || task_state.db.delete_job(&id, delete_leads))
+        .await
+        .map_err(anyhow::Error::from)??;
+    let count = removed.count;
+    state.notice_with_undo(
         "ok",
-        if removed > 0 {
-            format!("Deleted search \"{}\" and {removed} leads", job.name)
+        if count > 0 {
+            format!("Deleted search \"{}\" and {count} leads", job.name)
         } else {
             format!("Deleted search \"{}\"", job.name)
         },
+        Some(&removed.undo),
     );
     state.mark_jobs_dirty();
-    Ok(redirect(&headers, "/jobs"))
+    Ok(redirect(&headers, "/"))
 }
 
 // ------------------------------------------------------------------ form
@@ -520,7 +583,6 @@ struct JobNewPage {
     require_proxy: bool,
     allow_direct: bool,
     modes: Vec<Opt>,
-    countries: Vec<Opt>,
     groups: Vec<Opt>,
     max_concurrency: u32,
     picker: String,
@@ -536,31 +598,100 @@ struct JobNewPage {
 #[derive(serde::Serialize)]
 struct PickerState {
     country: String,
-    states: Vec<&'static str>,
-    /// Whether states expand into cities (US only).
-    expandable: bool,
-    codes: std::collections::HashMap<&'static str, &'static str>,
+    /// Every country as (name, ISO code), for the country search.
+    countries: Vec<(&'static str, &'static str)>,
+    /// "zip", "city" or "region".
+    depth: String,
+    #[serde(flatten)]
+    regions: Regions,
     all: bool,
     picked_states: Vec<String>,
     picked_cities: Vec<String>,
 }
 
+/// A country's states and how finely it can be split.
+#[derive(serde::Serialize)]
+struct Regions {
+    states: Vec<&'static str>,
+    /// Whether states expand into cities and towns.
+    expandable: bool,
+    /// Whether the finest split is by postal code rather than by town.
+    postal: bool,
+    /// "ZIP code" in the US, "postal code" elsewhere.
+    postal_noun: &'static str,
+    /// US state codes, for matching "Louisville, KY" to Kentucky.
+    codes: std::collections::HashMap<&'static str, &'static str>,
+    /// Places a whole-country search covers, per depth.
+    counts: RegionCounts,
+    /// Places each state covers: [postal codes or towns at the finest
+    /// split, towns].
+    areas: std::collections::HashMap<&'static str, [usize; 2]>,
+}
+
+#[derive(serde::Serialize)]
+struct RegionCounts {
+    zip: usize,
+    city: usize,
+    region: usize,
+}
+
+impl Regions {
+    fn of(country: &str) -> Self {
+        let selection = |depth| LocationSelection {
+            country: country.to_owned(),
+            mode: LocationMode::All,
+            depth,
+            ..LocationSelection::default()
+        };
+        let whole = selection(AreaDepth::Zip);
+        let us = crate::models::is_us(country);
+        let states = country_subdivisions(country);
+        let one = |state: &str, depth| {
+            LocationSelection {
+                country: country.to_owned(),
+                mode: LocationMode::States,
+                states: vec![state.to_owned()],
+                depth,
+                ..LocationSelection::default()
+            }
+            .place_count()
+        };
+        let areas = if whole.can_split() {
+            states
+                .iter()
+                .map(|&state| (state, [one(state, AreaDepth::Zip), one(state, AreaDepth::City)]))
+                .collect()
+        } else {
+            Default::default()
+        };
+        Self {
+            areas,
+            states: states.to_vec(),
+            expandable: whole.can_split(),
+            postal: whole.has_postal_codes(),
+            postal_noun: if us { "ZIP code" } else { "postal code" },
+            codes: if us { crate::geo::us_state_codes() } else { Default::default() },
+            counts: RegionCounts {
+                zip: whole.place_count(),
+                city: selection(AreaDepth::City).place_count(),
+                region: selection(AreaDepth::Region).place_count(),
+            },
+        }
+    }
+}
+
 impl PickerState {
     fn new(form: &JobForm) -> Self {
         let country = form.location_country.clone();
-        let states = country_subdivisions(&country).to_vec();
-        let expandable = country == "United States";
         Self {
-            expandable,
-            codes: if expandable {
-                crate::geo::us_state_codes()
-            } else {
-                Default::default()
-            },
+            regions: Regions::of(&country),
+            countries: std::iter::once(("United States", "US"))
+                .chain(crate::world::countries().iter().copied())
+                .collect(),
+            depth: if form.depth.trim().is_empty() { "zip".to_owned() } else { form.depth.trim().to_owned() },
             all: form.location_mode == "all",
             picked_states: form.states.clone(),
             picked_cities: form.cities.clone(),
-            states,
             country,
         }
     }
@@ -630,10 +761,6 @@ pub async fn new_form(
         .iter()
         .map(|(value, label)| Opt::new(*value, *label, &form.mode))
         .collect(),
-        countries: COUNTRY_OPTIONS
-            .iter()
-            .map(|country| Opt::new(*country, *country, &form.location_country))
-            .collect(),
         groups,
         max_concurrency: MAX_CONCURRENCY,
         picker: serde_json::to_string(&PickerState::new(&form)).map_err(anyhow::Error::from)?,
@@ -660,30 +787,47 @@ pub struct RegionsQuery {
 
 /// States or provinces of a country, for the location picker.
 pub async fn regions(Query(query): Query<RegionsQuery>) -> WebResult {
-    let states = country_subdivisions(&query.country);
-    let expandable = query.country == "United States";
-    Ok(axum::Json(serde_json::json!({
-        "states": states,
-        "expandable": expandable,
-        "codes": if expandable { crate::geo::us_state_codes() } else { Default::default() },
-    }))
-    .into_response())
+    let country = query.country;
+    let regions = tokio::task::spawn_blocking(move || Regions::of(&country))
+        .await
+        .map_err(anyhow::Error::from)?;
+    Ok(axum::Json(regions).into_response())
+}
+
+/// Google Maps categories for the business type picker. Fixed per build, so
+/// browsers can keep it; the page asks for it with the app version.
+pub async fn categories() -> axum::response::Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=604800, immutable"),
+        ],
+        crate::categories::json(),
+    )
+        .into_response()
 }
 
 #[derive(Deserialize, Default)]
 pub struct CitiesQuery {
+    #[serde(default)]
+    country: String,
     #[serde(default)]
     state: String,
     #[serde(default)]
     q: String,
 }
 
-/// Cities of a US state, or US cities matching a search, for the picker.
+/// Cities of a state, or cities matching a search, for the picker.
 pub async fn cities(Query(query): Query<CitiesQuery>) -> WebResult {
-    let cities = if query.q.trim().is_empty() {
-        crate::geo::us_cities(&query.state)
-    } else {
-        crate::geo::us_city_search(&query.q, 40)
+    let world = (!query.country.trim().is_empty() && !crate::models::is_us(&query.country))
+        .then(|| crate::world::country(&query.country))
+        .flatten();
+    let searching = !query.q.trim().is_empty();
+    let cities = match world {
+        Some(country) if searching => country.city_search(&query.q, 40),
+        Some(country) => country.cities(&query.state),
+        None if searching => crate::geo::us_city_search(&query.q, 40),
+        None => crate::geo::us_cities(&query.state),
     };
     Ok(axum::Json(cities).into_response())
 }
@@ -693,27 +837,43 @@ pub async fn cities(Query(query): Query<CitiesQuery>) -> WebResult {
 struct JobPreview {
     error: String,
     ready: bool,
-    goal: String,
-    goal_label: &'static str,
     what: String,
     place: String,
-    coverage: String,
+    lookups: String,
+    lookup_math: String,
+    goal: String,
+    time: String,
+    collects: String,
+    proxies: String,
+    proxy_tone: &'static str,
 }
 
-pub async fn preview(Form(form): Form<JobForm>) -> WebResult {
+impl JobPreview {
+    fn empty(error: String) -> Self {
+        Self {
+            error,
+            ready: false,
+            what: String::new(),
+            place: String::new(),
+            lookups: String::new(),
+            lookup_math: String::new(),
+            goal: String::new(),
+            time: String::new(),
+            collects: String::new(),
+            proxies: String::new(),
+            proxy_tone: "",
+        }
+    }
+}
+
+/// Seconds one worker spends on a lookup, paging included. Rough on
+/// purpose: the summary says "about".
+const SECONDS_PER_LOOKUP: f64 = 4.0;
+
+pub async fn preview(State(state): State<SharedState>, Form(form): Form<JobForm>) -> WebResult {
     let config = match form.to_config() {
         Ok(config) => config,
-        Err(error) => {
-            return render(JobPreview {
-                error,
-                ready: false,
-                goal: String::new(),
-                goal_label: "",
-                what: String::new(),
-                place: String::new(),
-                coverage: String::new(),
-            });
-        }
+        Err(error) => return render(JobPreview::empty(error)),
     };
     // Nothing to complain about until something is typed.
     let typed = config.queries.iter().any(|query| !query.trim().is_empty());
@@ -728,6 +888,9 @@ pub async fn preview(Form(form): Form<JobForm>) -> WebResult {
         .iter()
         .filter(|query| !query.trim().is_empty())
         .collect();
+    if !error.is_empty() || queries.is_empty() {
+        return render(JobPreview::empty(error));
+    }
     let what = match queries.as_slice() {
         [] => String::new(),
         [one] => (*one).clone(),
@@ -737,46 +900,109 @@ pub async fn preview(Form(form): Form<JobForm>) -> WebResult {
         .location_selection
         .as_ref()
         .map_or(config.locations.len(), LocationSelection::place_count);
-    let zips = config.location_selection.as_ref().is_some_and(|selection| {
-        selection.can_split()
-            && selection.depth == AreaDepth::Zip
-            && selection.mode != LocationMode::PostalCodes
-    });
-    let area = if zips { "ZIP code" } else { "place" };
-    let areas = format!(
-        "{} {area}{}",
-        fmt_count(i64::try_from(places).unwrap_or(i64::MAX)),
-        if places == 1 { "" } else { "s" }
-    );
-    let coverage = if config.collect_all {
-        format!("Searches all {areas} and keeps everything Google Maps has.")
-    } else if zips {
+    let area = config
+        .location_selection
+        .as_ref()
+        .filter(|selection| {
+            selection.can_split()
+                && selection.depth != AreaDepth::Region
+                && selection.mode != LocationMode::PostalCodes
+        })
+        .map_or("place", |selection| match selection.depth {
+            AreaDepth::Zip if crate::models::is_us(&selection.country) => "ZIP code",
+            AreaDepth::Zip if selection.has_postal_codes() => "postal code",
+            _ if crate::models::is_us(&selection.country) => "place",
+            _ => "town",
+        });
+    let plural = |count: usize, noun: &str| {
         format!(
-            "Searches {areas}, busiest areas first, and stops at {} leads.",
-            fmt_count(i64::from(config.total_limit))
+            "{} {noun}{}",
+            fmt_count(i64::try_from(count).unwrap_or(i64::MAX)),
+            if count == 1 { "" } else { "s" }
         )
+    };
+    let lookups = config.lookup_count();
+    let lookup_math = if queries.len() > 1 {
+        format!("· {} × {}", plural(queries.len(), "business type"), plural(places, area))
+    } else {
+        format!("· one per {area}")
+    };
+    let workers = f64::from(config.concurrency.max(1));
+    let seconds = (lookups as f64 * SECONDS_PER_LOOKUP / workers) as i64;
+    let time = if config.collect_all {
+        format!("About {} to cover every area", super::views::fmt_duration(seconds))
     } else {
         format!(
-            "Searches {areas} and stops at {} leads.",
+            "Up to {}; it stops sooner once it has {} leads",
+            super::views::fmt_duration(seconds),
             fmt_count(i64::from(config.total_limit))
         )
     };
+    let mut collects = vec!["name, phone, website, address, rating and hours".to_owned()];
+    if config.find_emails {
+        collects.push("emails and socials from each website".to_owned());
+    }
+    if config.place_details {
+        collects.push("reviews, owner and photos from Google".to_owned());
+    }
+    if config.verify_emails {
+        collects.push("a mail-server check of each email".to_owned());
+    }
+    let group_id = config.proxy_group_id.as_deref().filter(|id| !id.is_empty());
+    let healthy = state
+        .db
+        .proxy_status_counts(group_id)?
+        .get("healthy")
+        .copied()
+        .unwrap_or(0);
+    let group_name = match group_id {
+        Some(id) => state
+            .db
+            .list_proxy_groups()?
+            .into_iter()
+            .find(|group| group.id == id)
+            .map(|group| group.name),
+        None => None,
+    };
+    let pool = group_name.map_or_else(|| "your proxies".to_owned(), |name| format!("the {name} group"));
+    let (proxies, proxy_tone) = if healthy > 0 {
+        (
+            format!("{} healthy in {pool}, {} requests at a time", fmt_count(healthy), config.concurrency),
+            "",
+        )
+    } else if config.require_proxy && !config.allow_direct {
+        (
+            format!("No healthy proxies in {pool}, and this search requires one. Check proxies first."),
+            "warn-text",
+        )
+    } else {
+        (
+            format!("None healthy in {pool}, so requests go out directly, {} at a time", config.concurrency),
+            if config.concurrency > 20 { "warn-text" } else { "" },
+        )
+    };
     render(JobPreview {
-        ready: error.is_empty() && !queries.is_empty(),
+        ready: true,
         error,
-        goal: if config.collect_all {
-            "All".to_owned()
-        } else {
-            fmt_count(i64::from(config.total_limit))
-        },
-        goal_label: if config.collect_all {
-            "leads available"
-        } else {
-            "leads max"
-        },
         what,
         place: super::views::location_summary(&config),
-        coverage,
+        lookups: fmt_count(i64::try_from(lookups).unwrap_or(i64::MAX)),
+        lookup_math,
+        goal: if config.collect_all {
+            "Everything Google Maps has".to_owned()
+        } else {
+            format!("{} leads", fmt_count(i64::from(config.total_limit)))
+        },
+        time,
+        collects: {
+            let mut text = collects.join("; ");
+            if let Some(first) = text.get(0..1) {
+                text = first.to_uppercase() + &text[1..];
+            }
+            text
+        },
+        proxies,
+        proxy_tone,
     })
 }
 

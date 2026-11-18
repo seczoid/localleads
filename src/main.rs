@@ -1,5 +1,6 @@
 mod app;
 mod auth;
+mod categories;
 mod db;
 mod enrich;
 mod error;
@@ -11,7 +12,10 @@ mod mcp;
 mod models;
 mod proxy;
 mod scraper;
+mod serverlog;
+mod update;
 mod web;
+mod world;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -79,6 +83,8 @@ async fn main() -> Result<()> {
     #[cfg(not(feature = "verify"))]
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let args = Args::parse();
+    serverlog::started();
+    serverlog::catch_panics();
     raise_open_file_limit();
     let use_default_database = args.db.is_none();
     let database_path = args.db.unwrap_or(default_database_path()?);
@@ -89,6 +95,9 @@ async fn main() -> Result<()> {
         Some(Command::Healthcheck) => return healthcheck(args.bind).await,
         None => {}
     }
+    // A newer version installed from the dashboard runs instead of this
+    // one (it gets the same arguments). Returns when this one should run.
+    update::hand_off(&database_path);
     let public_url = args.public_url.as_deref().map(parse_public_url).transpose()?;
     if let Some(backup) = args.restore {
         db::Database::restore_to(backup, &database_path).context("restore database backup")?;
@@ -120,6 +129,19 @@ async fn main() -> Result<()> {
         setup_code: setup_code.clone(),
     });
     let state = app::AppState::new(database, database_path.clone());
+    // Searches the app was running when it last stopped carry on.
+    if let Err(error) = state.resume_orphaned_jobs() {
+        serverlog::error!("Couldn't pick up unfinished searches: {error:#}");
+    }
+    tokio::spawn(state.clone().adopt_late_orphans());
+    if let Some((level, message)) = update::startup_notice() {
+        state.notice(level, message);
+    }
+    tokio::spawn(update::confirm_when_settled(database_path.clone()));
+    {
+        let state = state.clone();
+        tokio::spawn(update::check_loop(database_path.clone(), move || state.update_changed()));
+    }
 
     let url = if args.bind.ip().is_unspecified() {
         format!("http://127.0.0.1:{}", args.bind.port())
@@ -132,12 +154,17 @@ async fn main() -> Result<()> {
         database_path.display()
     );
     println!("Listening on {url}  (Ctrl+C to stop)");
+    serverlog::remember(
+        "info",
+        format!("LocalLeads {} started, listening on {url}", env!("CARGO_PKG_VERSION")),
+        serverlog::started(),
+    );
     if let Some(public) = &public_url {
         println!("Public address: {}", public.as_str().trim_end_matches('/'));
     }
     if exposed && public_url.as_ref().is_none_or(|url| url.scheme() != "https") {
-        eprintln!(
-            "warning: listening beyond localhost without an https:// --public-url; sign-in cookies and API keys travel in plain text unless an HTTPS proxy sits in front"
+        serverlog::warning!(
+            "listening beyond localhost without an https:// --public-url; sign-in cookies and API keys travel in plain text unless an HTTPS proxy sits in front"
         );
     }
     if let Some(code) = &setup_code {
@@ -250,6 +277,6 @@ fn open_browser(url: &str) {
         std::process::Command::new("xdg-open").arg(url).spawn()
     };
     if let Err(error) = result {
-        eprintln!("could not open a browser: {error}");
+        serverlog::warning!("could not open a browser: {error}");
     }
 }

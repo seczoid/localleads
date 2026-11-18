@@ -31,6 +31,8 @@ pub struct City {
     pub label: String,
     pub state: String,
     pub zips: u32,
+    /// People living there, when known (towns outside the US).
+    pub population: u32,
 }
 
 struct Zip {
@@ -38,16 +40,21 @@ struct Zip {
     city: &'static str,
     latitude: f64,
     longitude: f64,
+    /// Stands for every ZIP of its city that has no point of its own (PO
+    /// boxes, single companies): those share one point, and Google Maps
+    /// can't place them, so the city is searched there once by name.
+    shared: bool,
 }
 
 struct Places {
-    /// State code → its ZIP codes, sorted by city then ZIP.
+    /// State code → its ZIP codes, sorted by city then ZIP. A city's ZIPs
+    /// that share one point appear once (see `Zip::shared`).
     by_state: HashMap<&'static str, Vec<Zip>>,
     /// Lower-case state name or code → state code.
     state_codes: HashMap<String, &'static str>,
     /// ZIP code → (state code, latitude, longitude).
     zip_points: HashMap<&'static str, (&'static str, f64, f64)>,
-    /// (state code, city) → ZIP codes in that city.
+    /// (state code, city) → areas a ZIP-level search makes of that city.
     city_sizes: HashMap<(&'static str, &'static str), u32>,
     /// State code → state name.
     state_names: HashMap<&'static str, &'static str>,
@@ -59,27 +66,37 @@ fn places() -> &'static Places {
         let mut by_state: HashMap<&'static str, Vec<Zip>> = HashMap::new();
         let mut zip_points = HashMap::new();
         let mut city_sizes: HashMap<(&'static str, &'static str), u32> = HashMap::new();
-        for line in ZIPS.lines() {
-            let mut fields = line.split('\t');
-            let (Some(code), Some(city), Some(state), Some(latitude), Some(longitude)) = (
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-                fields.next(),
-            ) else {
-                continue;
-            };
-            let (Ok(latitude), Ok(longitude)) = (latitude.parse(), longitude.parse()) else {
-                continue;
-            };
+        let rows: Vec<(&'static str, &'static str, &'static str, f64, f64)> = ZIPS
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split('\t');
+                let (code, city, state) = (fields.next()?, fields.next()?, fields.next()?);
+                let latitude = fields.next()?.parse().ok()?;
+                let longitude = fields.next()?.parse().ok()?;
+                Some((code, city, state, latitude, longitude))
+            })
+            .collect();
+        let point = |state, city, latitude: f64, longitude: f64| {
+            (state, city, latitude.to_bits(), longitude.to_bits())
+        };
+        let mut on_point: HashMap<_, u32> = HashMap::new();
+        for &(_, city, state, latitude, longitude) in &rows {
+            *on_point.entry(point(state, city, latitude, longitude)).or_default() += 1;
+        }
+        let mut cities_shared = std::collections::HashSet::new();
+        for (code, city, state, latitude, longitude) in rows {
             zip_points.insert(code, (state, latitude, longitude));
+            let shared = on_point[&point(state, city, latitude, longitude)] > 1;
+            if shared && !cities_shared.insert((state, city)) {
+                continue;
+            }
             *city_sizes.entry((state, city)).or_default() += 1;
             by_state.entry(state).or_default().push(Zip {
                 code,
                 city,
                 latitude,
                 longitude,
+                shared,
             });
         }
         let mut state_codes = HashMap::new();
@@ -119,8 +136,9 @@ pub fn us_state_code(state: &str) -> Option<&'static str> {
 }
 
 fn zip_area(code: &'static str, zip: &Zip) -> Area {
+    let name = if zip.shared { zip.city } else { zip.code };
     Area {
-        label: format!("{}, {code}", zip.code),
+        label: format!("{name}, {code}"),
         latitude: zip.latitude,
         longitude: zip.longitude,
         weight: places()
@@ -187,6 +205,7 @@ pub fn us_cities(state: &str) -> Vec<City> {
                 .get(&(code, zip.city))
                 .copied()
                 .unwrap_or(1),
+            population: 0,
         });
     }
     cities
@@ -228,6 +247,7 @@ pub fn us_city_search(query: &str, limit: usize) -> Vec<City> {
                 .unwrap_or(code)
                 .to_owned(),
             zips,
+            population: 0,
         })
         .collect()
 }
@@ -411,6 +431,27 @@ mod tests {
         assert!(cities.iter().any(|city| city.label == "Louisville, KY"));
         let found = us_city_search("louis", 5);
         assert_eq!(found[0].label, "Louisville, KY");
+    }
+
+    #[test]
+    fn zips_without_a_point_of_their_own_are_searched_once() {
+        // Austin has 74 ZIPs; 26 of them (PO boxes, the IRS) sit on two
+        // shared points. Searching "78709, TX" gets results from all of
+        // Texas, so those are one area, "Austin, TX".
+        let zips = us_city_zip_areas("Austin, TX");
+        assert_eq!(zips.len(), 49);
+        assert_eq!(us_city_zip_count("Austin, TX"), 49);
+        let labels: std::collections::HashSet<_> = zips.iter().map(|zip| zip.label.as_str()).collect();
+        assert_eq!(labels.len(), zips.len(), "labels are unique");
+        assert!(labels.contains("Austin, TX"));
+        assert!(labels.contains("78701, TX"));
+        assert!(!labels.contains("78709, TX"));
+        // A ZIP typed in by hand still has its place.
+        assert_eq!(us_zip_place("78709").map(|(label, _)| label).as_deref(), Some("78709, TX"));
+        let texas = us_zip_areas("Texas");
+        assert_eq!(us_area_count("Texas", false), texas.len());
+        let labels: std::collections::HashSet<_> = texas.iter().map(|zip| zip.label.as_str()).collect();
+        assert_eq!(labels.len(), texas.len(), "labels are unique across a state");
     }
 
     #[test]

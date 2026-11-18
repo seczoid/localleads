@@ -28,6 +28,26 @@ pub struct BackupParams {
     pub path: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UndoParams {
+    /// The undo_id a delete tool returned (delete_search, delete_leads,
+    /// delete_proxies, prune_proxies, delete_proxy_group).
+    pub undo_id: String,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct ServerLogParams {
+    /// Lines to return, newest last. Default 100, max 1000.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Only lines after this seq (from an earlier call), to follow the log.
+    #[serde(default)]
+    pub after: Option<u64>,
+    /// Only this level and worse: "info" (everything), "warn" or "error".
+    #[serde(default)]
+    pub level: Option<String>,
+}
+
 #[tool_router(router = app_router, vis = "pub(super)")]
 impl LocalLeadsMcp {
     #[tool(
@@ -108,6 +128,58 @@ impl LocalLeadsMcp {
             "data_dir": self.state.db_path.parent().map(|path| path.display().to_string()),
             "db_size_bytes": self.state.db.file_size(),
             "stats": stats,
+            "update": update_json(),
+        }))
+    }
+
+    #[tool(
+        description = "Undo a delete within 60 minutes of it: pass the undo_id that delete_search, delete_leads, delete_proxies, prune_proxies or delete_proxy_group returned. Puts the rows back as they were; a business found again since keeps its newer copy. Like the Undo button on the dashboard's toast.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn undo_delete(&self, Parameters(params): Parameters<UndoParams>) -> ToolResult {
+        let id = params.undo_id.trim().to_owned();
+        let state = self.state.clone();
+        let restored = blocking(move || state.db.restore(&id))
+            .await?
+            .ok_or_else(|| "that delete can no longer be undone (it is over 60 minutes old, or already undone)".to_owned())?;
+        if matches!(restored.kind.as_str(), "proxies" | "proxy_group") {
+            let _ = self.state.refresh_running_pools();
+            self.state.mark_proxies_dirty();
+        } else {
+            self.state.mark_jobs_dirty();
+            self.state.mark_leads_dirty();
+        }
+        self.state.notice("ok", format!("Restored {}", restored.label));
+        reply(json!({ "restored": restored.label, "kind": restored.kind }))
+    }
+
+    #[tool(
+        description = "The System page: the server's own log since it started (searches, proxy checks, enrichment, errors, updates), oldest first, with the server's start time. Pass after=<last seq> to read only new lines. Only shows the dashboard server's log when connected to it (engine=dashboard).",
+        annotations(read_only_hint = true)
+    )]
+    async fn server_log(&self, Parameters(params): Parameters<ServerLogParams>) -> ToolResult {
+        let worst = match params.level.as_deref().map(str::trim) {
+            Some("error") => 2,
+            Some("warn") => 1,
+            None | Some("" | "info" | "all") => 0,
+            Some(other) => return Err(format!("level must be info, warn or error, not {other:?}")),
+        };
+        let rank = |level: &str| match level {
+            "error" => 2,
+            "warn" => 1,
+            _ => 0,
+        };
+        let limit = params.limit.unwrap_or(100).clamp(1, 1000);
+        let lines: Vec<_> = crate::serverlog::lines_after(params.after.unwrap_or(0), 3000)
+            .into_iter()
+            .filter(|line| rank(line.level) >= worst)
+            .collect();
+        let skip = lines.len().saturating_sub(limit);
+        reply(json!({
+            "started_at": crate::serverlog::started().format("%Y-%m-%d %H:%M:%S").to_string(),
+            "engine": self.mode,
+            "dropped": crate::serverlog::dropped(),
+            "lines": &lines[skip..],
         }))
     }
 
@@ -146,4 +218,25 @@ impl LocalLeadsMcp {
         self.state.notice("ok", message);
         reply(json!({ "path": destination.display().to_string(), "size_bytes": size }))
     }
+}
+
+/// Whether a newer release is out, as the sidebar knows it.
+fn update_json() -> serde_json::Value {
+    let sidebar = crate::update::sidebar();
+    if !sidebar.enabled {
+        return json!({ "checks": "off" });
+    }
+    if sidebar.update.is_empty() {
+        return json!({ "available": false });
+    }
+    json!({
+        "available": true,
+        "version": sidebar.update,
+        "notes": sidebar.notes_url,
+        "how": if sidebar.manual_only {
+            "No build for this system: install it by hand from the release page."
+        } else {
+            "The dashboard's sidebar shows an Update and restart button."
+        },
+    })
 }

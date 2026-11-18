@@ -1,0 +1,20 @@
+<div class="stages{% if !stages.web_on %} one{% endif %}">
+  <div class="stage">
+    <div class="stage-head">
+      <h3>Google Maps</h3>
+      <span class="stage-count"><b>{{ stages.maps_num }}</b> {{ stages.maps_of }}</span>
+    </div>
+    <div class="progress lg{% if stages.maps_moving %} indeterminate{% endif %}" role="progressbar" aria-label="Google Maps" aria-valuenow="{{ stages.maps_pct }}" aria-valuemin="0" aria-valuemax="100"><i style="width: {{ stages.maps_pct }}%"></i></div>
+    <p class="stage-detail">{{ stages.maps_detail }}{% if !stages.maps_done && !job.rate.is_empty() %} · {{ job.rate }} leads a minute{% endif %}{% if !stages.maps_done && !job.eta.is_empty() %} · about {{ job.eta }} left{% endif %}{% if !stages.maps_failed.is_empty() %} · <span class="error-text">{{ stages.maps_failed }}</span>{% endif %}</p>
+  </div>
+  {% if stages.web_on %}
+  <div class="stage">
+    <div class="stage-head">
+      <h3>{{ stages.web_title }}</h3>
+      <span class="stage-count"><b>{{ stages.web_num }}</b> {{ stages.web_of }}</span>
+    </div>
+    <div class="progress lg web" role="progressbar" aria-label="{{ stages.web_title }}" aria-valuenow="{{ stages.web_pct }}" aria-valuemin="0" aria-valuemax="100"><i style="width: {{ stages.web_pct }}%"></i></div>
+    <p class="stage-detail">{{ stages.web_detail }}</p>
+  </div>
+  {% endif %}
+</div>

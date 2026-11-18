@@ -11,7 +11,13 @@ mod leads;
 mod proxies;
 mod table;
 mod settings;
+mod system;
+mod updates;
 pub mod views;
+
+/// ProxyScrape affiliate link, shown in the sidebar and on the Proxies page.
+/// LocalLeads earns a commission on purchases made through it.
+pub const PROXYSCRAPE_URL: &str = "https://fas.st/t/R1CJJibL";
 
 use crate::app::{SharedState, UiEvent};
 use askama::Template;
@@ -57,25 +63,33 @@ fn router(state: SharedState, guard: Guard) -> Router {
     // API key). MCP has its own API-key check (see `crate::mcp::router`).
     let signed_in = Router::new()
         .route("/", get(dashboard::page))
-        .route("/partials/dashboard", get(dashboard::live))
+        .route("/partials/searches", get(dashboard::live))
         .route("/jobs", get(jobs::list).post(jobs::create))
-        .route("/partials/jobs", get(jobs::table))
         .route("/jobs/new", get(jobs::new_form))
         .route("/jobs/preview", post(jobs::preview))
         .route("/jobs/{id}", get(jobs::detail))
         .route("/jobs/{id}/live", get(jobs::live))
+        .route("/jobs/{id}/events", get(jobs::events))
+        .route("/jobs/{id}/log.txt", get(jobs::log_txt))
         .route("/jobs/{id}/pause", post(jobs::toggle_pause))
         .route("/jobs/{id}/stop", post(jobs::stop))
         .route("/jobs/{id}/rerun", post(jobs::rerun))
+        .route("/jobs/{id}/continue", post(jobs::continue_job))
+        .route("/update", post(updates::start))
+        .route("/update/check", post(updates::check))
+        .route("/update/dismiss", post(updates::dismiss))
+        .route("/update/card", get(updates::card))
+        .route("/update/status", get(updates::status))
         .route("/jobs/{id}/delete", post(jobs::delete))
         .route("/locations/regions", get(jobs::regions))
         .route("/locations/cities", get(jobs::cities))
-        .route("/leads", get(leads::lists))
-        .route("/partials/lists", get(leads::lists_partial))
-        .route("/leads/browse", get(leads::browse))
+        .route("/search/categories.json", get(jobs::categories))
+        .route("/leads", get(leads::browse))
+        .route("/leads/browse", get(leads::old_browse))
         .route("/partials/leads/browse", get(leads::browse_partial))
         .route("/leads/data", get(leads::data))
         .route("/leads/export.csv", get(leads::export_csv))
+        .route("/leads/export/columns", get(leads::export_columns))
         .route("/leads/export.json", get(leads::export_json))
         .route("/leads/export-disk", post(leads::export_disk))
         .route("/leads/bulk", post(leads::bulk))
@@ -96,12 +110,16 @@ fn router(state: SharedState, guard: Guard) -> Router {
         .route("/groups/{id}/delete", post(proxies::delete_group))
         .route("/agents", get(guide::mcp))
         .route("/docs", get(guide::docs))
+        .route("/system", get(system::page))
+        .route("/system/log.json", get(system::lines))
+        .route("/system/log.txt", get(system::log_txt))
         .route("/settings", get(settings::page))
         .route("/settings/backup", post(settings::backup))
         .route("/settings/backup.sqlite", get(settings::download_backup))
         .route("/account/password", post(account::change_password))
         .route("/agents/keys", post(guide::create_key))
         .route("/agents/keys/{id}/revoke", post(guide::revoke_key))
+        .route("/trash/{id}/restore", post(restore))
         // JSON API
         .route("/api/stats", get(api::stats))
         .route("/api/jobs", get(api::jobs))
@@ -129,17 +147,41 @@ pub async fn serve(state: SharedState, options: ServerOptions) -> anyhow::Result
         Guard::Any
     };
     let db_path = state.db_path.clone();
+    let jobs = state.clone();
     let app = router(state, guard);
-    let listener = tokio::net::TcpListener::bind(options.addr).await?;
+    let listener = bind(options.addr).await?;
     let _announcement = crate::mcp::announce(&db_path, &local_url(options.addr));
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             shutdown_signal().await;
-            eprintln!("Shutting down");
+            crate::serverlog::info!("Shutting down");
+            // Running searches save what they finished and keep their
+            // status, so the next start carries them on.
+            jobs.suspend_jobs(std::time::Duration::from_secs(10)).await;
             crate::mcp::shutdown();
         })
         .await?;
     Ok(())
+}
+
+/// Binds `addr`. Right after a restart the old process may still hold the
+/// port for a moment, so a busy port is tried again for a while.
+async fn bind(addr: SocketAddr) -> anyhow::Result<tokio::net::TcpListener> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => return Ok(listener),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AddrInUse
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context(format!("listen on {addr}")));
+            }
+        }
+    }
 }
 
 /// Ctrl+C, or SIGTERM from `docker stop` and systemd.
@@ -229,15 +271,24 @@ async fn events(State(state): State<SharedState>) -> impl IntoResponse {
             Ok(UiEvent::Proxies) => Event::default().event("proxies").data("1"),
             Ok(UiEvent::Leads) => Event::default().event("leads").data("1"),
             Ok(UiEvent::ProxyProgress) => Event::default().event("proxy-progress").data("1"),
+            Ok(UiEvent::Update) => Event::default().event("update").data("1"),
             Ok(UiEvent::Notice(notice)) => Event::default()
                 .event("notice")
                 .json_data(notice)
                 .unwrap_or_else(|_| Event::default().comment("bad notice")),
+            Ok(UiEvent::JobFinished(finished)) => Event::default()
+                .event("job-finished")
+                .json_data(finished)
+                .unwrap_or_else(|_| Event::default().comment("bad event")),
             // The client fell behind; ask it to refresh everything.
             Err(_) => Event::default().event("resync").data("1"),
         };
         Ok::<_, Infallible>(event)
     });
+    // Ends with the server, so a shutdown doesn't wait on open browser tabs
+    // (they reconnect to the next process on their own).
+    let token = crate::mcp::shutdown_token().clone();
+    let stream = futures::StreamExt::take_until(stream, async move { token.cancelled().await });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -280,14 +331,14 @@ async fn static_file(Path(path): Path<String>) -> Response {
             include_bytes!("../../static/fonts/ibm-plex-mono-500.woff2"),
             "font/woff2",
         ),
-        "docs/dashboard.jpg" => (include_bytes!("../../static/docs/dashboard.jpg"), "image/jpeg"),
-        "docs/new-search.jpg" => (include_bytes!("../../static/docs/new-search.jpg"), "image/jpeg"),
-        "docs/search-live.jpg" => (include_bytes!("../../static/docs/search-live.jpg"), "image/jpeg"),
-        "docs/leads-browse.jpg" => (include_bytes!("../../static/docs/leads-browse.jpg"), "image/jpeg"),
-        "docs/lead-detail.jpg" => (include_bytes!("../../static/docs/lead-detail.jpg"), "image/jpeg"),
-        "docs/proxies.jpg" => (include_bytes!("../../static/docs/proxies.jpg"), "image/jpeg"),
-        "docs/mcp.jpg" => (include_bytes!("../../static/docs/mcp.jpg"), "image/jpeg"),
-        "docs/settings.jpg" => (include_bytes!("../../static/docs/settings.jpg"), "image/jpeg"),
+        "docs/dashboard.png" => (include_bytes!("../../static/docs/dashboard.png"), "image/png"),
+        "docs/new-search.png" => (include_bytes!("../../static/docs/new-search.png"), "image/png"),
+        "docs/search-live.png" => (include_bytes!("../../static/docs/search-live.png"), "image/png"),
+        "docs/leads-browse.png" => (include_bytes!("../../static/docs/leads-browse.png"), "image/png"),
+        "docs/lead-detail.png" => (include_bytes!("../../static/docs/lead-detail.png"), "image/png"),
+        "docs/proxies.png" => (include_bytes!("../../static/docs/proxies.png"), "image/png"),
+        "docs/mcp.png" => (include_bytes!("../../static/docs/mcp.png"), "image/png"),
+        "docs/settings.png" => (include_bytes!("../../static/docs/settings.png"), "image/png"),
         _ => return (StatusCode::NOT_FOUND, "Not found").into_response(),
     };
     let cache = if path.starts_with("vendor/") || path.starts_with("fonts/") || path.starts_with("docs/") {
@@ -355,6 +406,9 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if self.status.is_server_error() {
+            crate::serverlog::error!("{} {}", self.status.as_u16(), self.message);
+        }
         (
             self.status,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -389,16 +443,28 @@ pub fn is_htmx(headers: &HeaderMap) -> bool {
 }
 
 /// Builds an `HX-Trigger` header that shows a toast and fires extra events.
-pub fn trigger(level: &str, message: &str, events: &[&str]) -> (&'static str, HeaderValue) {
-    let mut map = serde_json::Map::new();
-    map.insert(
-        "notice".to_owned(),
-        serde_json::json!({ "level": level, "message": message }),
-    );
-    for event in events {
-        map.insert((*event).to_owned(), serde_json::Value::Null);
+/// HX-Trigger header showing a toast and firing `events`. With `undo`, the
+/// toast offers Undo, restoring that trash entry.
+pub fn trigger_with_undo(
+    level: &str,
+    message: &str,
+    undo: Option<&str>,
+    events: &[&str],
+) -> (&'static str, HeaderValue) {
+    let mut notice = serde_json::json!({ "level": level, "message": message });
+    if let Some(undo) = undo {
+        notice["undo"] = serde_json::Value::String(crate::app::undo_url(undo));
     }
-    let json = ascii_json(&serde_json::Value::Object(map).to_string());
+    // htmx fires these in order on the element that made the request, and
+    // events like close-modal remove that element: once it is gone, later
+    // events never reach the page. So the notice goes first; a JSON map
+    // would sort it after them.
+    let mut json = format!("{{\"notice\":{notice}");
+    for event in events {
+        json.push_str(&format!(",{}:null", serde_json::Value::String((*event).to_owned())));
+    }
+    json.push('}');
+    let json = ascii_json(&json);
     (
         "HX-Trigger",
         HeaderValue::from_str(&json).unwrap_or_else(|_| HeaderValue::from_static("{}")),
@@ -406,14 +472,40 @@ pub fn trigger(level: &str, message: &str, events: &[&str]) -> (&'static str, He
 }
 
 pub fn notify(level: &str, message: &str, events: &[&str]) -> Response {
+    notify_with_undo(level, message, None, events)
+}
+
+pub fn notify_with_undo(level: &str, message: &str, undo: Option<&str>, events: &[&str]) -> Response {
     (
         [
-            trigger(level, message, events),
+            trigger_with_undo(level, message, undo, events),
             ("HX-Reswap", HeaderValue::from_static("none")),
         ],
         "",
     )
         .into_response()
+}
+
+/// Undoes a delete: puts the trash entry's rows back.
+async fn restore(State(state): State<SharedState>, Path(id): Path<String>) -> WebResult {
+    let task_state = state.clone();
+    let restored = tokio::task::spawn_blocking(move || task_state.db.restore(&id))
+        .await
+        .map_err(anyhow::Error::from)??
+        .ok_or_else(|| AppError::not_found("That can no longer be undone"))?;
+    let events: &[&str] = match restored.kind.as_str() {
+        "proxies" | "proxy_group" => {
+            let _ = state.refresh_running_pools();
+            state.mark_proxies_dirty();
+            &["proxies-changed"]
+        }
+        _ => {
+            state.mark_jobs_dirty();
+            state.mark_leads_dirty();
+            &["jobs-changed", "leads-changed"]
+        }
+    };
+    Ok(notify("ok", &format!("Restored {}", restored.label), events))
 }
 
 pub fn redirect(headers: &HeaderMap, location: &str) -> Response {

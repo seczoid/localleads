@@ -1,0 +1,96 @@
+{% if oob %}{% include "partials/home_sub.html" %}{% endif %}
+{% if rows.is_empty() %}
+<section class="first-run">
+  <h2>Find your first leads</h2>
+  <p>Tell LocalLeads what kind of business to look for and where. It searches Google Maps area by area, reads each business's website for emails, and saves every lead here as it's found.</p>
+  <ol class="first-steps">
+    <li><b>Pick a business type</b><span>hvac, dentist, roofing contractor…</span></li>
+    <li><b>Pick places</b><span>a whole country, some states, or a few cities</span></li>
+    <li><b>Export the list</b><span>filter by email, rating or city, then download a CSV</span></li>
+  </ol>
+  <a class="btn primary lg" href="/jobs/new">Start a search</a>
+</section>
+{% else %}
+
+{% if !running.is_empty() %}
+<section class="section" aria-label="Running now">
+  <div class="section-head"><h2>Running now</h2></div>
+  {% for item in running %}
+  {% let job = item.job %}
+  <article class="run">
+    <div class="run-top">
+      <div class="run-title">
+        <a href="/jobs/{{ job.id }}">{{ job.name }}</a>
+        <span class="badge {{ job.status_class }}">{% if job.status_class == "live" %}<span class="pulse"></span>{% endif %}{{ job.status }}</span>
+      </div>
+      <div class="row-actions">
+        {% include "partials/job_controls.html" %}
+        <a class="btn sm" href="/leads?source={{ job.id }}">Open leads</a>
+      </div>
+    </div>
+    {% let stages = item.stages %}
+    {% include "partials/job_stages.html" %}
+    {% if !job.started_ago.is_empty() %}<p class="band-foot muted">Started {{ job.started_ago }}</p>{% endif %}
+  </article>
+  {% endfor %}
+</section>
+{% else %}
+<p class="quiet-line">Nothing running right now. <a href="/jobs/new">Start a new search</a> or duplicate one below.</p>
+{% endif %}
+
+<section class="section" aria-label="All searches">
+  <div class="section-head"><h2>All searches</h2><p>Each search keeps its own lead list. A business found by several searches is stored once.</p></div>
+  <div class="table-panel">
+    <div class="table-scroll" data-scroll-key="searches">
+    <table class="table hover stack-sm searches-table">
+      <thead><tr>
+        <th>Search</th><th>Status</th><th class="num">Leads</th><th class="w-cov cov-col">Phone</th><th class="w-cov cov-col">Website</th><th>Last lead</th><th class="actions-col"><span class="sr-only">Actions</span></th>
+      </tr></thead>
+      <tbody>
+        <tr class="all-row">
+          <td data-label="">
+            <a class="strong" href="/leads">All leads</a>
+            <div class="muted small">{% if all.has_leads %}{{ all.places }} cities · {{ all.categories }} categories{% else %}Every search's leads, in one list{% endif %}</div>
+          </td>
+          <td data-label="Status"><span class="muted small">Every search</span></td>
+          <td data-label="Leads" class="num strong">{{ all.leads }}</td>
+          <td data-label="Phone" class="cov-col">{% if all.has_leads %}<div class="cov"><span class="cov-bar"><i style="width: {{ all.phone_pct }}%"></i></span><span>{{ all.phone_pct }}%</span></div>{% endif %}</td>
+          <td data-label="Website" class="cov-col">{% if all.has_leads %}<div class="cov"><span class="cov-bar"><i style="width: {{ all.website_pct }}%"></i></span><span>{{ all.website_pct }}%</span></div>{% endif %}</td>
+          <td data-label="Last lead"></td>
+          <td class="actions-col"><div class="row-actions"><a class="btn sm" href="/leads">Open leads</a><span class="menu-spacer" aria-hidden="true"></span></div></td>
+        </tr>
+        {% for row in rows %}
+        {% let job = row.job %}
+        <tr>
+          <td data-label="">
+            <a class="strong" href="/jobs/{{ job.id }}">{{ job.name }}</a>
+            <div class="muted small clip-cell" title="{{ job.queries }} · {{ job.locations }}">{{ job.queries }}{% if !job.locations.is_empty() %} · {{ job.locations }}{% endif %}</div>
+            {% if !job.error.is_empty() %}<div class="error-text small clip-cell" title="{{ job.error }}">{{ job.error }}</div>{% endif %}
+          </td>
+          <td data-label="Status">
+            <span class="badge {{ job.status_class }}">{% if job.status_class == "live" %}<span class="pulse"></span>{% endif %}{{ job.status }}</span>
+            {% if job.active %}<div class="progress mini{% if !job.has_target %} indeterminate{% endif %}"><i style="width: {{ job.pct }}%"></i></div>{% endif %}
+          </td>
+          <td data-label="Leads" class="num">
+            <div>
+              {% if row.has_leads %}<a href="/leads?source={{ job.id }}">{{ row.leads }}</a>{% else %}<span class="muted">0</span>{% endif %}
+              {% if !row.shared.is_empty() %}<div class="muted small" title="Businesses another search also found">{{ row.shared }} shared</div>{% endif %}
+            </div>
+          </td>
+          <td data-label="Phone" class="cov-col">{% if row.has_leads %}<div class="cov"><span class="cov-bar"><i style="width: {{ row.phone_pct }}%"></i></span><span>{{ row.phone_pct }}%</span></div>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td data-label="Website" class="cov-col">{% if row.has_leads %}<div class="cov"><span class="cov-bar"><i style="width: {{ row.website_pct }}%"></i></span><span>{{ row.website_pct }}%</span></div>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td data-label="Last lead" class="small muted nowrap">{{ row.updated }}</td>
+          <td class="actions-col">
+            <div class="row-actions">
+              {% if row.has_leads %}<a class="btn sm" href="/leads?source={{ job.id }}">Open leads</a>{% else %}<a class="btn sm" href="/jobs/{{ job.id }}">Progress</a>{% endif %}
+              {% include "partials/job_menu.html" %}
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+{% endif %}

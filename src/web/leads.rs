@@ -1,13 +1,15 @@
 //! Leads: one list per search, and a faceted view across all of them.
 
 use super::views::{
-    JobView, LeadDetailView, LeadView, fmt_ago, fmt_count, percent, place_label,
+    JobView, LeadDetailView, LeadView, fmt_count, place_label,
 };
 use super::table::{TablePage, TableParams};
-use super::{AppError, RenderHtml, WebResult, notify, render};
+use super::{AppError, RenderHtml, WebResult, notify, notify_with_undo, render};
 use crate::app::SharedState;
 use crate::db::{FacetCount, LeadFacets, LeadQuery, WebsiteFilter};
-use crate::export::{csv_bytes, export_records_to_disk, json_bytes};
+use crate::export::{
+    CsvLayout, ESSENTIAL_COLUMNS, JsonArrayWriter, clean_groups, column_groups, export_query_to_disk,
+};
 use askama::Template;
 use axum::body::Body;
 use axum::extract::{Path, RawQuery, State};
@@ -17,9 +19,6 @@ use axum_extra::extract::Query;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path as FsPath;
-
-/// Facet options shown before "Show more".
-const FACET_PREVIEW: usize = 8;
 
 #[derive(Deserialize, Default, Clone, Debug)]
 pub struct LeadFilters {
@@ -201,152 +200,24 @@ pub async fn data(
     Ok(axum::Json(page).into_response())
 }
 
-// ---------------------------------------------------------------- lists
-
-struct CategoryChip {
-    label: String,
-    count: String,
-    href: String,
-}
-
-struct ListCard {
-    job: JobView,
-    leads: String,
-    has_leads: bool,
-    shared: String,
-    phone_pct: u32,
-    website_pct: u32,
-    categories: Vec<CategoryChip>,
-    more_categories: usize,
-    updated: String,
-    href: String,
-}
-
-struct AllCard {
-    leads: String,
-    has_leads: bool,
-    phone_pct: u32,
-    website_pct: u32,
-    no_website: String,
-    categories: Vec<CategoryChip>,
-    more_categories: usize,
-    places: String,
-}
-
-#[derive(Template)]
-#[template(path = "partials/lead_lists.html")]
-struct LeadLists {
-    all: AllCard,
-    cards: Vec<ListCard>,
-}
-
-fn chips(source: Option<&str>, categories: &[(String, i64)]) -> (Vec<CategoryChip>, usize) {
-    let chips = categories
-        .iter()
-        .take(3)
-        .map(|(label, count)| {
-            let mut pairs = Vec::new();
-            if let Some(source) = source {
-                pairs.push(("source", source.to_owned()));
-            }
-            let value = if label == "Uncategorized" { "" } else { label };
-            pairs.push(("category", value.to_owned()));
-            CategoryChip {
-                label: label.clone(),
-                count: fmt_count(*count),
-                href: with_qs("/leads/browse", &encode(&pairs)),
-            }
-        })
-        .collect();
-    (chips, categories.len().saturating_sub(3))
-}
-
-impl LeadLists {
-    fn load(state: &SharedState) -> WebResult<Self> {
-        let stats = state.db.stats()?;
-        let (all_categories, city_count) = state.db.lead_overview()?;
-        let list_stats = state.db.lead_list_stats()?;
-        let (all_chips, all_more) = chips(None, &all_categories);
-        let all = AllCard {
-            leads: fmt_count(stats.leads),
-            has_leads: stats.leads > 0,
-            phone_pct: percent(stats.leads_with_phone, stats.leads),
-            website_pct: percent(stats.leads_with_website, stats.leads),
-            no_website: fmt_count(stats.leads - stats.leads_with_website),
-            categories: all_chips,
-            more_categories: all_more,
-            places: fmt_count(city_count),
-        };
-        let cards = state
-            .db
-            .list_jobs()?
-            .iter()
-            .map(|job| {
-                let list = list_stats.get(&job.id).cloned().unwrap_or_default();
-                let (categories, more_categories) = chips(Some(&job.id), &list.categories);
-                ListCard {
-                    job: JobView::new(job, state.is_live(&job.id)),
-                    leads: fmt_count(list.leads),
-                    has_leads: list.leads > 0,
-                    shared: if list.leads > list.first_found {
-                        fmt_count(list.leads - list.first_found)
-                    } else {
-                        String::new()
-                    },
-                    phone_pct: percent(list.with_phone, list.leads),
-                    website_pct: percent(list.with_website, list.leads),
-                    categories,
-                    more_categories,
-                    updated: fmt_ago(
-                        list.last_found
-                            .as_deref()
-                            .or(job.finished_at.as_deref())
-                            .or(job.started_at.as_deref()),
-                    ),
-                    href: with_qs("/leads/browse", &encode(&[("source", job.id.clone())])),
-                }
-            })
-            .collect();
-        Ok(Self { all, cards })
-    }
-}
-
-#[derive(Template)]
-#[template(path = "leads.html")]
-struct ListsPage {
-    nav: &'static str,
-    lists: String,
-}
-
-/// `/leads`: the lead lists. Old filter links go on to the browse view.
-pub async fn lists(State(state): State<SharedState>, RawQuery(raw): RawQuery) -> WebResult {
-    if let Some(raw) = raw.filter(|value| !value.is_empty()) {
-        return Ok(Redirect::to(&format!("/leads/browse?{raw}")).into_response());
-    }
-    let lists = LeadLists::load(&state)?.render_html()?;
-    render(ListsPage { nav: "leads", lists })
-}
-
-pub async fn lists_partial(State(state): State<SharedState>) -> WebResult {
-    render(LeadLists::load(&state)?)
-}
-
 // ---------------------------------------------------------------- browse
 
 struct FacetOption {
     value: String,
     label: String,
+    /// Lowercased label, for the dropdown's find box.
+    key: String,
     count: String,
     checked: bool,
-    /// Past the preview and not selected: shown after "Show more".
-    extra: bool,
 }
 
 struct FacetGroup {
     param: &'static str,
     title: &'static str,
+    /// "Find a category…"
+    find: &'static str,
     options: Vec<FacetOption>,
-    extra: usize,
+    selected: usize,
 }
 
 struct RadioOption {
@@ -387,19 +258,20 @@ fn category_label(value: &str) -> String {
 fn facet_group(
     param: &'static str,
     title: &'static str,
+    find: &'static str,
     counts: &[FacetCount],
     selected: &[String],
     label: impl Fn(&str) -> String,
 ) -> FacetGroup {
     let mut options: Vec<FacetOption> = counts
         .iter()
-        .enumerate()
-        .map(|(index, facet)| {
+        .map(|facet| {
             let checked = selected.contains(&facet.value);
+            let label = label(&facet.value);
             FacetOption {
-                label: label(&facet.value),
+                key: label.to_lowercase(),
+                label,
                 count: fmt_count(facet.count),
-                extra: index >= FACET_PREVIEW && !checked,
                 checked,
                 value: facet.value.clone(),
             }
@@ -412,20 +284,22 @@ fn facet_group(
                 0,
                 FacetOption {
                     value: value.clone(),
+                    key: label(value).to_lowercase(),
                     label: label(value),
                     count: "0".to_owned(),
                     checked: true,
-                    extra: false,
                 },
             );
         }
     }
-    let extra = options.iter().filter(|option| option.extra).count();
+    // Selected values first, so they're easy to untick.
+    options.sort_by_key(|option| !option.checked);
     FacetGroup {
         param,
         title,
+        find,
+        selected: selected.len(),
         options,
-        extra,
     }
 }
 
@@ -462,16 +336,17 @@ impl BrowseBody {
             }
         };
         let groups = vec![
-            facet_group("source", "Search", &sources, &selected_sources, source_label),
+            facet_group("source", "Search", "Find a search…", &sources, &selected_sources, source_label),
             facet_group(
                 "category",
                 "Category",
+                "Find a category…",
                 &facets.categories,
                 &filters.category,
                 category_label,
             ),
-            facet_group("state", "State", &facets.states, &filters.state, state_label),
-            facet_group("city", "City", &facets.cities, &filters.city, city_label),
+            facet_group("state", "State", "Find a state…", &facets.states, &filters.state, state_label),
+            facet_group("city", "City", "Find a city…", &facets.cities, &filters.city, city_label),
         ];
 
         let website = filters.website_value();
@@ -534,7 +409,7 @@ impl BrowseBody {
         let mut chip = |key: &str, value: &str, label: String| {
             chips.push(Chip {
                 label,
-                href: with_qs("/leads/browse", &filters.qs_without(key, value)),
+                href: with_qs("/leads", &filters.qs_without(key, value)),
             });
         };
         if !filters.q.trim().is_empty() {
@@ -634,6 +509,14 @@ pub async fn browse(
     })
 }
 
+/// `/leads/browse` was the old address of the lead table.
+pub async fn old_browse(RawQuery(raw): RawQuery) -> axum::response::Redirect {
+    match raw.filter(|value| !value.is_empty()) {
+        Some(raw) => Redirect::permanent(&format!("/leads?{raw}")),
+        None => Redirect::permanent("/leads"),
+    }
+}
+
 /// Facets plus the results header (out of band); the table reloads itself
 /// after the swap. Keeps the address bar in step so reload and back return
 /// to the same filters.
@@ -642,7 +525,7 @@ pub async fn browse_partial(
     Query(filters): Query<LeadFilters>,
 ) -> WebResult {
     let mut response = render(BrowseBody::load(&state, &filters, true)?)?;
-    let url = with_qs("/leads/browse", &filters.qs());
+    let url = with_qs("/leads", &filters.qs());
     if let Ok(value) = HeaderValue::from_str(&url) {
         response.headers_mut().insert("HX-Replace-Url", value);
     }
@@ -670,13 +553,14 @@ pub async fn detail(State(state): State<SharedState>, Path(id): Path<String>) ->
 
 pub async fn delete(State(state): State<SharedState>, Path(id): Path<String>) -> WebResult {
     let removed = state.db.delete_leads(&[id])?;
-    if removed == 0 {
+    if removed.count == 0 {
         return Err(AppError::not_found("Lead not found"));
     }
     state.mark_jobs_dirty();
-    Ok(notify(
+    Ok(notify_with_undo(
         "ok",
         "Lead deleted",
+        Some(&removed.undo),
         &["leads-changed", "close-modal"],
     ))
 }
@@ -745,28 +629,26 @@ pub async fn bulk(
     match form.action.as_str() {
         "csv" | "json" => {
             let stem = export_stem(&state, &form.filters()?);
-            let records =
-                tokio::task::spawn_blocking(move || state.db.export_leads_query(&query))
-                    .await
-                    .map_err(anyhow::Error::from)??;
             Ok(if form.action == "csv" {
-                attachment("text/csv; charset=utf-8", &format!("{stem}.csv"), csv_bytes(&records)?)
+                stream_export(state, query, ExportFormat::Csv(CsvLayout::clean()), &stem)
             } else {
-                attachment("application/json", &format!("{stem}.json"), json_bytes(&records)?)
+                stream_export(state, query, ExportFormat::Json, &stem)
             })
         }
         "delete" => {
             let task_state = state.clone();
-            let removed = tokio::task::spawn_blocking(move || -> anyhow::Result<usize> {
+            let removed = tokio::task::spawn_blocking(move || -> anyhow::Result<crate::db::Removed> {
                 let ids = task_state.db.lead_ids(&query)?;
                 task_state.db.delete_leads(&ids)
             })
             .await
             .map_err(anyhow::Error::from)??;
             state.mark_jobs_dirty();
-            Ok(notify(
+            let count = removed.count;
+            Ok(notify_with_undo(
                 "ok",
-                &format!("Deleted {} {}", fmt_count(removed as i64), if removed == 1 { "lead" } else { "leads" }),
+                &format!("Deleted {} {}", fmt_count(count as i64), if count == 1 { "lead" } else { "leads" }),
+                Some(&removed.undo),
                 &["leads-changed"],
             ))
         }
@@ -822,42 +704,179 @@ fn export_stem(state: &SharedState, filters: &LeadFilters) -> String {
     )
 }
 
-async fn export_records(
-    state: SharedState,
-    filters: LeadFilters,
-) -> WebResult<Vec<crate::models::BusinessRecord>> {
-    let records =
-        tokio::task::spawn_blocking(move || state.db.export_leads_query(&filters.query(0, 0)))
-            .await
-            .map_err(anyhow::Error::from)??;
-    Ok(records)
+#[derive(Clone)]
+enum ExportFormat {
+    /// With the layout and columns to write.
+    Csv(CsvLayout),
+    Json,
 }
 
-fn attachment(content_type: &str, file_name: &str, body: Vec<u8>) -> axum::response::Response {
+/// Bytes gathered before each piece goes to the browser.
+const EXPORT_CHUNK: usize = 64 * 1024;
+
+/// An `io::Write` that hands full chunks to the response body. A failed
+/// send means the browser went away, so writing stops there.
+struct ChunkSender {
+    buffer: Vec<u8>,
+    tx: tokio::sync::mpsc::Sender<std::io::Result<axum::body::Bytes>>,
+    gone: bool,
+}
+
+impl ChunkSender {
+    fn send(&mut self) -> std::io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::replace(&mut self.buffer, Vec::with_capacity(EXPORT_CHUNK));
+        self.tx
+            .blocking_send(Ok(axum::body::Bytes::from(chunk)))
+            .map_err(|_| {
+                self.gone = true;
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "download cancelled")
+            })
+    }
+}
+
+impl std::io::Write for ChunkSender {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buffer.extend_from_slice(data);
+        if self.buffer.len() >= EXPORT_CHUNK {
+            self.send()?;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.send()
+    }
+}
+
+fn write_export(
+    state: &SharedState,
+    query: &LeadQuery,
+    format: &ExportFormat,
+    sink: &mut ChunkSender,
+) -> anyhow::Result<()> {
+    match format {
+        ExportFormat::Csv(layout) => {
+            let mut writer = csv::Writer::from_writer(&mut *sink);
+            layout.write_header(&mut writer)?;
+            // The header goes out at once so the download starts while
+            // the database is still sorting the rows.
+            writer.flush()?;
+            state.db.for_each_export_lead(query, |record| {
+                layout.write_record(&mut writer, &record)?;
+                Ok(true)
+            })?;
+            writer.flush()?;
+        }
+        ExportFormat::Json => {
+            let mut writer = JsonArrayWriter::new(&mut *sink)?;
+            std::io::Write::flush(writer.get_mut())?;
+            state.db.for_each_export_lead(query, |record| {
+                writer.push(&record)?;
+                Ok(true)
+            })?;
+            writer.finish()?;
+        }
+    }
+    Ok(())
+}
+
+/// Sends the export as it is read, so the browser starts the download at
+/// once instead of waiting for the whole file to be built.
+fn stream_export(
+    state: SharedState,
+    query: LeadQuery,
+    format: ExportFormat,
+    stem: &str,
+) -> axum::response::Response {
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    let format_for_task = format.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut sink = ChunkSender {
+            buffer: Vec::with_capacity(EXPORT_CHUNK),
+            tx,
+            gone: false,
+        };
+        if let Err(error) = write_export(&state, &query, &format_for_task, &mut sink) {
+            if !sink.gone {
+                crate::serverlog::error!("Export failed: {error:#}");
+                // Failing the body makes the browser mark the download as
+                // failed instead of saving a file that is silently short.
+                let _ = sink.tx.blocking_send(Err(std::io::Error::other(error.to_string())));
+            }
+        }
+    });
+    let (content_type, extension) = match format {
+        ExportFormat::Csv(_) => ("text/csv; charset=utf-8", "csv"),
+        ExportFormat::Json => ("application/json", "json"),
+    };
     (
         [
             (header::CONTENT_TYPE, content_type.to_owned()),
             (
                 header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{file_name}\""),
+                format!("attachment; filename=\"{stem}.{extension}\""),
             ),
         ],
-        Body::from(body),
+        Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)),
     )
         .into_response()
+}
+
+#[derive(Deserialize, Default)]
+pub struct ExportColumns {
+    /// Comma list of CSV columns; empty means all.
+    #[serde(default)]
+    columns: String,
+    /// "outscraper" for every Outscraper-style column; otherwise the clean CSV.
+    #[serde(default)]
+    style: String,
 }
 
 pub async fn export_csv(
     State(state): State<SharedState>,
     Query(filters): Query<LeadFilters>,
+    Query(chosen): Query<ExportColumns>,
 ) -> WebResult {
     let stem = export_stem(&state, &filters);
-    let records = export_records(state, filters).await?;
-    Ok(attachment(
-        "text/csv; charset=utf-8",
-        &format!("{stem}.csv"),
-        csv_bytes(&records)?,
-    ))
+    let layout = CsvLayout::pick(&chosen.style, &chosen.columns);
+    Ok(stream_export(state, filters.query(0, 0), ExportFormat::Csv(layout), &stem))
+}
+
+#[derive(Template)]
+#[template(path = "partials/csv_columns.html")]
+struct CsvColumns {
+    /// The filters the download keeps, as a query string.
+    filters: String,
+    /// The clean CSV's sections: (section, [(id, header)]).
+    clean: Vec<(&'static str, Vec<(&'static str, &'static str)>)>,
+    clean_total: usize,
+    groups: Vec<(&'static str, Vec<&'static str>)>,
+    essentials: String,
+    total: usize,
+}
+
+/// The column chooser for a CSV download of the given filters.
+pub async fn export_columns(RawQuery(query): RawQuery) -> WebResult {
+    let filters = query
+        .unwrap_or_default()
+        .split('&')
+        .filter(|pair| !pair.is_empty() && !pair.starts_with("columns=") && !pair.starts_with("style="))
+        .collect::<Vec<_>>()
+        .join("&");
+    render(CsvColumns {
+        filters,
+        clean: clean_groups()
+            .into_iter()
+            .map(|(name, columns)| (name, columns.into_iter().map(|c| (c.id, c.header)).collect()))
+            .collect(),
+        clean_total: crate::export::CLEAN_COLUMNS.len(),
+        groups: column_groups(),
+        essentials: ESSENTIAL_COLUMNS.join(","),
+        total: crate::export::OUTPUT_COLUMNS.len(),
+    })
 }
 
 pub async fn export_json(
@@ -865,12 +884,7 @@ pub async fn export_json(
     Query(filters): Query<LeadFilters>,
 ) -> WebResult {
     let stem = export_stem(&state, &filters);
-    let records = export_records(state, filters).await?;
-    Ok(attachment(
-        "application/json",
-        &format!("{stem}.json"),
-        json_bytes(&records)?,
-    ))
+    Ok(stream_export(state, filters.query(0, 0), ExportFormat::Json, &stem))
 }
 
 /// Writes CSV and JSON beside the database, like the desktop app did.
@@ -884,12 +898,14 @@ pub async fn export_disk(
         .unwrap_or_else(|| FsPath::new("."))
         .to_path_buf();
     let stem = directory.join(export_stem(&state, &filters));
-    let records = export_records(state.clone(), filters).await?;
+    let query = filters.query(0, 0);
     let stem_for_task = stem.clone();
-    let count =
-        tokio::task::spawn_blocking(move || export_records_to_disk(&records, &stem_for_task))
-            .await
-            .map_err(anyhow::Error::from)??;
+    let task_state = state.clone();
+    let count = tokio::task::spawn_blocking(move || {
+        export_query_to_disk(&task_state.db, &query, &stem_for_task)
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
     let message = format!("Exported {count} leads to {}.csv and .json", stem.display());
     state.notice("ok", message.clone());
     Ok(notify("ok", &message, &[]))

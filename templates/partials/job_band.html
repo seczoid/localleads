@@ -1,0 +1,6 @@
+<section class="band{% if job.active %} is-live{% endif %}" aria-label="Progress">
+  {% include "partials/job_stages.html" %}
+  {% if !job.started.is_empty() %}<p class="band-foot muted">Started {{ job.started }}{% if !job.finished.is_empty() %} · finished {{ job.finished }}{% endif %}</p>{% endif %}
+  {% if job.active && !job.live %}<div class="callout warn">This search is marked as running, but this server process isn't running it, so it can't be paused or stopped from here.</div>{% endif %}
+  {% if !job.error.is_empty() %}<div class="callout bad">{{ job.error }}</div>{% endif %}
+</section>

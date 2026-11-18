@@ -2,18 +2,19 @@
 //! notices, and the broadcast channel that drives live browser updates.
 
 use crate::db::Database;
-use crate::events::AppEvent;
+use crate::db::EnrichCounts;
+use crate::events::{AppEvent, LiveProgress};
 use crate::models::{JobStatus, ProxyEntry, SearchConfig};
 use crate::proxy::{
     CancelToken, MAX_CONCURRENCY, ProxyPool, ProxyTestConfig, check_many_with_events,
     import_proxy_text,
 };
 use crate::scraper::{JobControl, run_job};
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
@@ -21,11 +22,19 @@ use tokio::sync::{broadcast, mpsc};
 const CHECKER_SETTINGS_KEY: &str = "proxy_checker";
 const MAX_NOTICES: usize = 50;
 
+/// The endpoint that restores a trash entry.
+pub fn undo_url(trash_id: &str) -> String {
+    format!("/trash/{trash_id}/restore")
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Notice {
     pub level: &'static str,
     pub message: String,
     pub at: String,
+    /// Where to POST to undo what the notice reports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub undo: Option<String>,
 }
 
 /// Signals pushed to every open browser tab over server-sent events.
@@ -37,7 +46,20 @@ pub enum UiEvent {
     Leads,
     /// Only the proxy check progress card changed.
     ProxyProgress,
+    /// The update card in the sidebar changed.
+    Update,
     Notice(Notice),
+    /// A search finished, failed or was stopped: tabs that allow it raise a
+    /// system notification.
+    JobFinished(JobFinished),
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct JobFinished {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -145,6 +167,13 @@ struct Runtime {
     notices: VecDeque<Notice>,
     /// Latest progress message per running job.
     activity: HashMap<String, String>,
+    /// Latest live counters per running job.
+    live: HashMap<String, LiveProgress>,
+    /// Website-reading counts per job, reused for a few seconds because
+    /// counting a big search's leads is slow.
+    enrich_counts: HashMap<String, (Instant, EnrichCounts)>,
+    /// When each search started reading websites, and how many it had read.
+    web_start: HashMap<String, (Instant, i64)>,
 }
 
 pub struct AppState {
@@ -157,7 +186,17 @@ pub struct AppState {
     proxies_dirty: AtomicBool,
     progress_dirty: AtomicBool,
     leads_dirty: AtomicBool,
+    /// Bumped by every change a live view shows, so a cached render is
+    /// dropped the moment it could be out of date.
+    changes: AtomicU64,
+    /// Live partials rendered once and shared by every open tab:
+    /// key -> (rendered at, `changes` then, html).
+    live_pages: Mutex<HashMap<String, (Instant, u64, String)>>,
 }
+
+/// Longest a shared live render is reused, even with nothing marked changed
+/// (counters that move without an event, like elapsed time).
+const LIVE_PAGE_FOR: Duration = Duration::from_millis(1500);
 
 pub type SharedState = Arc<AppState>;
 
@@ -177,6 +216,8 @@ impl AppState {
             leads_dirty: AtomicBool::new(false),
             proxies_dirty: AtomicBool::new(false),
             progress_dirty: AtomicBool::new(false),
+            changes: AtomicU64::new(0),
+            live_pages: Mutex::new(HashMap::new()),
         });
         tokio::spawn(event_loop(state.clone(), events_rx));
         tokio::spawn(flush_loop(state.clone()));
@@ -194,11 +235,25 @@ impl AppState {
     }
 
     pub fn notice(&self, level: &'static str, message: impl Into<String>) {
+        self.notice_with_undo(level, message, None);
+    }
+
+    /// A notice whose toast offers Undo, restoring the trash entry `undo`.
+    pub fn notice_with_undo(&self, level: &'static str, message: impl Into<String>, undo: Option<&str>) {
         let notice = Notice {
             level,
             message: message.into(),
             at: chrono::Local::now().format("%H:%M:%S").to_string(),
+            undo: undo.map(undo_url),
         };
+        crate::serverlog::record(
+            match level {
+                "error" | "bad" => "error",
+                "warn" => "warn",
+                _ => "info",
+            },
+            notice.message.clone(),
+        );
         {
             let mut runtime = self.runtime();
             runtime.notices.push_front(notice.clone());
@@ -212,11 +267,42 @@ impl AppState {
     }
 
     pub fn mark_jobs_dirty(&self) {
+        self.changes.fetch_add(1, Ordering::Relaxed);
         self.jobs_dirty.store(true, Ordering::Relaxed);
     }
 
     pub fn mark_proxies_dirty(&self) {
+        self.changes.fetch_add(1, Ordering::Relaxed);
         self.proxies_dirty.store(true, Ordering::Relaxed);
+    }
+
+    pub fn mark_leads_dirty(&self) {
+        self.changes.fetch_add(1, Ordering::Relaxed);
+        self.leads_dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// A live partial (search progress, the searches list) rendered once
+    /// and shared: every tab refreshes on the same signal, so without this
+    /// each would build the same page from the database again.
+    pub fn shared_render<E>(
+        &self,
+        key: &str,
+        render: impl FnOnce() -> Result<String, E>,
+    ) -> Result<String, E> {
+        let changes = self.changes.load(Ordering::Relaxed);
+        if let Ok(pages) = self.live_pages.lock()
+            && let Some((at, seen, html)) = pages.get(key)
+            && *seen == changes
+            && at.elapsed() < LIVE_PAGE_FOR
+        {
+            return Ok(html.clone());
+        }
+        let html = render()?;
+        if let Ok(mut pages) = self.live_pages.lock() {
+            pages.retain(|_, (at, _, _)| at.elapsed() < LIVE_PAGE_FOR);
+            pages.insert(key.to_owned(), (Instant::now(), changes, html.clone()));
+        }
+        Ok(html)
     }
 
     fn mark_progress_dirty(&self) {
@@ -254,15 +340,14 @@ impl AppState {
                 .map(|target| async move {
                     let (patch, summary) = enricher.enrich(&target).await;
                     let has_email = summary.email_count > 0;
-                    let db = state_ref.db.clone();
-                    let saved = tokio::task::spawn_blocking(move || {
-                        db.save_enrichment(&target.id, &patch, &summary)
-                    })
-                    .await;
-                    state_ref.leads_dirty.store(true, Ordering::Relaxed);
-                    matches!(saved, Ok(Ok(()))) && has_email
+                    let saved = state_ref
+                        .db
+                        .save_enrichment_async(target.id.clone(), patch, summary)
+                        .await;
+                    state_ref.mark_leads_dirty();
+                    saved.is_ok() && has_email
                 })
-                .buffer_unordered(12)
+                .buffer_unordered(64)
                 .filter(|found| std::future::ready(*found))
                 .count()
                 .await;
@@ -281,31 +366,227 @@ impl AppState {
         config.validate()?;
         let id = uuid::Uuid::new_v4().to_string();
         self.db.create_job(&id, &config)?;
+        self.launch_job(&id, &config, false, false)?;
+        self.notice("ok", format!("Started search \"{}\"", config.job_name));
+        Ok(id)
+    }
+
+    fn launch_job(&self, id: &str, config: &SearchConfig, paused: bool, resumed: bool) -> Result<()> {
+        if crate::update::restarting() {
+            bail!("LocalLeads is restarting for an update; try again in a moment");
+        }
         let pool = ProxyPool::new(
             self.db
                 .list_proxies_for_group(config.proxy_group_id.as_deref())?,
         );
         let control = JobControl::new();
+        if paused {
+            control.toggle_pause();
+        }
+        // Claimed before the task starts, so another process starting up
+        // now sees this search as taken.
+        self.db.claim_job_runner(id)?;
         {
             let mut runtime = self.runtime();
-            runtime.controls.insert(id.clone(), control.clone());
-            runtime.pools.insert(id.clone(), pool.clone());
+            runtime.controls.insert(id.to_owned(), control.clone());
+            runtime.pools.insert(id.to_owned(), pool.clone());
         }
         tokio::spawn(run_job(
             self.db.clone(),
-            id.clone(),
+            id.to_owned(),
             config.clone(),
             pool,
             control,
             self.events_tx.clone(),
+            resumed,
         ));
-        self.notice("ok", format!("Started search \"{}\"", config.job_name));
         self.mark_jobs_dirty();
-        Ok(id)
+        Ok(())
+    }
+
+    /// Picks up the searches that were running when the app last stopped
+    /// (a crash, a restart or a shutdown), from where each left off.
+    pub fn resume_orphaned_jobs(&self) -> Result<usize> {
+        let jobs = self.db.orphaned_jobs(&|id| self.is_live(id))?;
+        for (id, config, paused) in &jobs {
+            if let Err(error) = self.launch_job(id, config, *paused, true) {
+                let message = format!("Couldn't pick this search up again: {error}");
+                let _ = self.db.update_job_status(id, JobStatus::Interrupted, Some(&message));
+            }
+        }
+        if !jobs.is_empty() {
+            self.notice(
+                "info",
+                format!(
+                    "Picked up {} {} where {} left off",
+                    jobs.len(),
+                    if jobs.len() == 1 { "search" } else { "searches" },
+                    if jobs.len() == 1 { "it" } else { "they" }
+                ),
+            );
+        }
+        Ok(jobs.len())
+    }
+
+    /// Keeps looking for a while for searches whose earlier process was
+    /// still winding down at start-up, and picks those up too.
+    pub async fn adopt_late_orphans(self: Arc<Self>) {
+        for _ in 0..24 {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            if crate::update::restarting() {
+                return;
+            }
+            if let Err(error) = self.resume_orphaned_jobs() {
+                crate::serverlog::error!("Couldn't pick up unfinished searches: {error:#}");
+            }
+        }
+    }
+
+    /// Winds every running search down for a restart, keeping each one's
+    /// status so it carries on afterwards. Waits up to `wait` for them to
+    /// save what they finished.
+    pub async fn suspend_jobs(&self, wait: std::time::Duration) {
+        let controls: Vec<JobControl> = self.runtime().controls.values().cloned().collect();
+        for control in &controls {
+            control.suspend();
+        }
+        let deadline = Instant::now() + wait;
+        while !self.runtime().controls.is_empty() && Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    pub fn update_changed(&self) {
+        let _ = self.ui_tx.send(UiEvent::Update);
+    }
+
+    /// Installs the update on offer and restarts into it, in the
+    /// background. Errors only when it can't start at all.
+    pub fn start_update(self: &Arc<Self>) -> Result<()> {
+        let release = crate::update::begin()?;
+        self.update_changed();
+        let state = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = state.run_update(&release).await {
+                crate::serverlog::error!("Update to {} failed: {error:#}", release.version);
+                crate::update::set_phase(crate::update::Phase::Failed(format!("{error:#}")));
+                state.update_changed();
+                state.notice("error", format!("Couldn't update to {}: {error:#}", release.version));
+            }
+        });
+        Ok(())
+    }
+
+    async fn run_update(self: &Arc<Self>, release: &crate::update::Release) -> Result<()> {
+        use crate::update::{Phase, set_phase};
+        let release = crate::update::refresh(&self.db_path, release.clone()).await;
+        let staged = crate::update::prepare(&self.db_path, &release).await?;
+        set_phase(Phase::Busy("Backing up your data…".to_owned()));
+        self.update_changed();
+        {
+            let db_path = self.db_path.clone();
+            let version = release.version.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::update::backup_database(&db_path, &version)
+            })
+            .await?
+            {
+                Ok(Some(path)) => crate::serverlog::info!("Backed the database up to {}", path.display()),
+                Ok(None) => crate::serverlog::warning!("Not enough disk space to back the database up first; updating anyway"),
+                Err(error) => bail!("couldn't back up the database: {error:#}"),
+            }
+        }
+        {
+            let db_path = self.db_path.clone();
+            let staged = staged.clone();
+            tokio::task::spawn_blocking(move || crate::update::verify_staged(&db_path, &staged))
+                .await??;
+        }
+        set_phase(Phase::Restarting);
+        self.update_changed();
+        crate::serverlog::info!("Restarting into LocalLeads {}", release.version);
+        self.suspend_jobs(std::time::Duration::from_secs(15)).await;
+        // Lets the browser hear that the restart is underway.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let db_path = self.db_path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::update::restart_into(&db_path, &staged)
+        })
+        .await?;
+        // Only reached when the new version couldn't be started: carry on
+        // here, searches included.
+        let error = result.err().unwrap_or_else(|| anyhow!("couldn't start the new version"));
+        set_phase(Phase::Failed(format!("{error:#}")));
+        self.update_changed();
+        if let Err(error) = self.resume_orphaned_jobs() {
+            crate::serverlog::error!("Couldn't pick up unfinished searches: {error:#}");
+        }
+        Err(error)
+    }
+
+    /// Carries on a stopped, failed or interrupted search: finished areas
+    /// are skipped and its leads stay in the same list.
+    pub fn continue_job(&self, job_id: &str) -> Result<()> {
+        let job = self
+            .db
+            .get_job(job_id)?
+            .ok_or_else(|| anyhow!("Search not found"))?;
+        if job.status.is_active() || self.is_live(job_id) {
+            bail!("This search is still running");
+        }
+        if job.status == JobStatus::Completed {
+            bail!("This search is already complete");
+        }
+        self.launch_job(job_id, &job.config, false, true)?;
+        self.notice("ok", format!("Carrying on with \"{}\"", job.name));
+        Ok(())
     }
 
     pub fn job_activity(&self, job_id: &str) -> Option<String> {
         self.runtime().activity.get(job_id).cloned()
+    }
+
+    pub fn job_live_progress(&self, job_id: &str) -> Option<LiveProgress> {
+        self.runtime().live.get(job_id).copied()
+    }
+
+    /// How many of a search's leads have had their website read, counted
+    /// at most every few seconds per search.
+    pub fn job_enrich_counts(&self, job_id: &str) -> Result<EnrichCounts> {
+        const FRESH_FOR: Duration = Duration::from_secs(4);
+        if let Some((at, counts)) = self.runtime().enrich_counts.get(job_id)
+            && at.elapsed() < FRESH_FOR
+        {
+            return Ok(*counts);
+        }
+        let counts = self.db.job_enrich_counts(job_id)?;
+        self.runtime()
+            .enrich_counts
+            .insert(job_id.to_owned(), (Instant::now(), counts));
+        Ok(counts)
+    }
+
+    /// Websites read a minute since the search started reading them, once
+    /// there is half a minute to go on.
+    pub fn job_web_pace(&self, job_id: &str, read: i64) -> Option<f64> {
+        let reading = self
+            .job_live_progress(job_id)
+            .is_some_and(|live| live.reading_sites);
+        if !reading {
+            return None;
+        }
+        let mut runtime = self.runtime();
+        let (at, first) = *runtime
+            .web_start
+            .entry(job_id.to_owned())
+            .or_insert((Instant::now(), read));
+        let seconds = at.elapsed().as_secs_f64();
+        (seconds >= 30.0 && read > first).then(|| (read - first) as f64 * 60.0 / seconds)
+    }
+
+    /// Searches this process is running now.
+    pub fn running_searches(&self) -> usize {
+        self.runtime().controls.len()
     }
 
     pub fn is_live(&self, job_id: &str) -> bool {
@@ -485,8 +766,11 @@ impl AppState {
 async fn event_loop(state: SharedState, mut events: mpsc::UnboundedReceiver<AppEvent>) {
     while let Some(event) = events.recv().await {
         match event {
-            AppEvent::JobProgress { job_id, message } => {
-                state.runtime().activity.insert(job_id, message);
+            AppEvent::JobProgress { job_id, message, live } => {
+                let mut runtime = state.runtime();
+                runtime.live.insert(job_id.clone(), live);
+                runtime.activity.insert(job_id, message);
+                drop(runtime);
                 state.mark_jobs_dirty();
             }
             AppEvent::JobFinished {
@@ -499,6 +783,9 @@ async fn event_loop(state: SharedState, mut events: mpsc::UnboundedReceiver<AppE
                     runtime.controls.remove(&job_id);
                     runtime.pools.remove(&job_id);
                     runtime.activity.remove(&job_id);
+                    runtime.live.remove(&job_id);
+                    runtime.enrich_counts.remove(&job_id);
+                    runtime.web_start.remove(&job_id);
                     drop(runtime);
                     state
                         .db
@@ -506,7 +793,7 @@ async fn event_loop(state: SharedState, mut events: mpsc::UnboundedReceiver<AppE
                         .ok()
                         .flatten()
                         .map(|job| job.name)
-                        .unwrap_or(job_id)
+                        .unwrap_or_else(|| job_id.clone())
                 };
                 let level = match status {
                     JobStatus::Completed => "ok",
@@ -514,7 +801,22 @@ async fn event_loop(state: SharedState, mut events: mpsc::UnboundedReceiver<AppE
                     _ => "info",
                 };
                 state.notice(level, format!("{name}: {status} — {message}"));
+                let _ = state.ui_tx.send(UiEvent::JobFinished(JobFinished {
+                    id: job_id.clone(),
+                    name: name.clone(),
+                    status: status.to_string(),
+                    message: message.clone(),
+                }));
                 state.mark_jobs_dirty();
+            }
+            AppEvent::JobSuspended { job_id } => {
+                let mut runtime = state.runtime();
+                runtime.controls.remove(&job_id);
+                runtime.pools.remove(&job_id);
+                runtime.activity.remove(&job_id);
+                runtime.live.remove(&job_id);
+                runtime.enrich_counts.remove(&job_id);
+                runtime.web_start.remove(&job_id);
             }
             AppEvent::ProxyChecksStored {
                 healthy,

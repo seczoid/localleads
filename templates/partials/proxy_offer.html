@@ -1,0 +1,43 @@
+{#- Where to get proxies: ProxyScrape (affiliate link). -#}
+{%- if offer.kind == "empty" %}
+<section class="offer" aria-labelledby="offer-title">
+  <div class="offer-main">
+    <p class="offer-eyebrow"><svg class="ps-logo" viewBox="0 0 201 26" role="img" aria-label="ProxyScrape"><use href="#logo-proxyscrape"/></svg><span class="offer-eyebrow-sep" aria-hidden="true"></span><i class="dot ok"></i>Recommended for Google Maps</p>
+    <h2 id="offer-title">Get proxies and run bigger searches</h2>
+    <p class="offer-lead">Google Maps limits how much one IP address can look up. Residential proxies spread a search over real home connections, so large areas finish faster and get blocked less.</p>
+    <dl class="offer-stats">
+      <div><dt>120M+</dt><dd>residential IPs</dd></div>
+      <div><dt>190+</dt><dd>countries</dd></div>
+      <div><dt>City</dt><dd>level targeting</dd></div>
+    </dl>
+    <div class="offer-actions">
+      <a class="btn primary offer-cta" href="{{ offer.url }}" target="_blank" rel="sponsored noopener" hx-boost="false">Get proxies from ProxyScrape
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-external"/></svg></a>
+      <button type="button" class="btn ghost" @click="$dispatch('open-dialog', 'add')">I already have proxies</button>
+    </div>
+    <p class="offer-fine">Start free, no credit card needed. Residential from $1.15/GB. LocalLeads earns a small commission, at no extra cost to you.</p>
+  </div>
+  <ol class="offer-steps" aria-label="Set up in three steps">
+    <li><span class="offer-num">1</span><div><b>Create a free ProxyScrape account</b><span>Pick <b>Residential</b> proxies, set to rotating.</span></div></li>
+    <li><span class="offer-num">2</span><div><b>Copy your proxy address</b><span>From the ProxyScrape dashboard, like <code>http://user:pass@host:port</code></span></div></li>
+    <li><span class="offer-num">3</span><div><b>Paste it into Add proxies</b><span>Press <b>Check</b>. New searches use healthy proxies by themselves.</span></div></li>
+  </ol>
+</section>
+{%- else %}
+<div class="offer-strip{% if offer.kind == "failing" %} failing{% endif %}" x-data="offerStrip('ll-offer-{{ offer.kind }}')" x-show="shown" x-cloak role="note">
+  {%- if offer.kind == "failing" %}
+  <span class="offer-strip-icon"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-warning"/></svg></span>
+  {%- endif %}
+  <span class="offer-strip-logo"><svg class="ps-logo" viewBox="0 0 201 26" role="img" aria-label="ProxyScrape"><use href="#logo-proxyscrape"/></svg></span>
+  <p>
+    {%- if offer.kind == "failing" %}
+    <b>{{ offer.failed }} of {{ offer.checked }} checked proxies are failing.</b> Free and shared proxies rarely last on Google Maps. ProxyScrape's residential proxies rotate through 120M+ home IPs, from $1.15/GB.
+    {%- else %}
+    <b>Need more proxies?</b> ProxyScrape residential: 120M+ IPs in 190+ countries, rotating or sticky, from $1.15/GB. Start free.
+    {%- endif %}
+  </p>
+  <a class="btn sm primary" href="{{ offer.url }}" target="_blank" rel="sponsored noopener" hx-boost="false">{% if offer.kind == "failing" %}Get working proxies{% else %}See ProxyScrape plans{% endif %}
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-external"/></svg></a>
+  <button type="button" class="icon-btn" @click="hide()" aria-label="Hide for 30 days" title="Hide for 30 days"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-close"/></svg></button>
+</div>
+{%- endif %}

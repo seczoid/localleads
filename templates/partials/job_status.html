@@ -1,0 +1,1 @@
+<span class="badge lg {{ job.status_class }}">{% if job.status_class == "live" %}<span class="pulse"></span>{% endif %}{{ job.status }}</span>{% for tag in job.tags %}<span class="tag">{{ tag }}</span>{% endfor %}

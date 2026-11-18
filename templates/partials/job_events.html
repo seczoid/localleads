@@ -1,0 +1,7 @@
+{% if events.is_empty() %}
+<li class="log-empty">Nothing logged yet. Events appear here as the search runs.</li>
+{% else %}
+{% for event in events %}
+<li class="{{ event.level }}" data-level="{{ event.level }}"><time>{{ event.time }}</time><span class="lvl">{{ event.level }}</span><span class="msg">{{ event.message }}</span><button type="button" class="log-copy" data-copy-line title="Copy this line" aria-label="Copy this line"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-copy"/></svg></button></li>
+{% endfor %}
+{% endif %}

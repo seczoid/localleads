@@ -46,6 +46,15 @@ regex = "1.13.1"
 # Certificate checks for the Google clients, which build their own TLS
 # config (see scraper::google_tls).
 rustls-platform-verifier = "0.7.1"
+# In-app updates: release versions, and unpacking the downloaded archive.
+semver = "1"
+
+[target.'cfg(not(windows))'.dependencies]
+tar = "0.4"
+flate2 = "1"
+
+[target.'cfg(windows)'.dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
