@@ -3,7 +3,7 @@ name = "localleads"
 version = "0.2.3"
 edition = "2024"
 description = "Self-hosted Google Maps lead finder with email enrichment, a proxy checker and an MCP server for AI agents"
-license = "MIT"
+license = "AGPL-3.0-only"
 repository = "https://github.com/seczoid/localleads"
 homepage = "https://github.com/seczoid/localleads"
 

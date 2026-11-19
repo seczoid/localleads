@@ -36,4 +36,4 @@ ENTRYPOINT ["tini", "--", "localleads"]
 
 LABEL org.opencontainers.image.title="LocalLeads" \
       org.opencontainers.image.description="Self-hosted Google Maps lead finder with email enrichment and an MCP server" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="AGPL-3.0-only"
