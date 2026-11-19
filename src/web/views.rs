@@ -259,7 +259,12 @@ impl StagesView {
         let reading_sites = active
             && job.config.enriches()
             && live.map_or(counts.read > 0, |live| live.reading_sites);
-        let maps_pct = if job.status == JobStatus::Completed || reading_sites {
+        // A search stopped while reading websites had finished Google Maps:
+        // websites are only read once every area is searched.
+        let maps_finished = job.status == JobStatus::Completed
+            || reading_sites
+            || (!active && job.config.enriches() && counts.read > 0);
+        let maps_pct = if maps_finished {
             100
         } else if has_target {
             percent(job.collected, job.total)
@@ -278,9 +283,14 @@ impl StagesView {
                 fmt_count(live.lookups_done),
                 fmt_count(live.total_lookups)
             ),
+            _ if maps_finished && job.status != JobStatus::Completed => format!(
+                "All {} {} searched",
+                fmt_count(planned),
+                if planned == 1 { "area" } else { "areas" }
+            ),
             _ => format!("{} {}", fmt_count(planned), if planned == 1 { "area" } else { "areas" }),
         };
-        if !active && !has_target && job.status != JobStatus::Completed {
+        if !active && !has_target && !maps_finished {
             detail.push_str(", stopped before all were searched");
         }
         if job.duplicates > 0 {
@@ -322,7 +332,7 @@ impl StagesView {
             maps_pct,
             maps_moving: active && !has_target && live.is_none(),
             maps_detail: detail,
-            maps_done: reading_sites,
+            maps_done: maps_finished,
             maps_failed: if job.failures > 0 {
                 format!(
                     "{} {} failed",
@@ -1213,6 +1223,40 @@ mod tests {
         assert_eq!(fmt_count(999), "999");
         assert_eq!(fmt_count(1_000), "1,000");
         assert_eq!(fmt_count(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn a_search_stopped_while_reading_sites_finished_google_maps() {
+        let job = |read| {
+            let summary = crate::models::JobSummary {
+                id: "j".to_owned(),
+                name: "Dentists".to_owned(),
+                status: JobStatus::Cancelled,
+                total: 0,
+                collected: 120,
+                failures: 0,
+                duplicates: 0,
+                started_at: None,
+                finished_at: None,
+                error: None,
+                config: crate::models::SearchConfig {
+                    queries: vec!["dentist".to_owned()],
+                    locations: vec!["Austin, TX".to_owned(), "Dallas, TX".to_owned()],
+                    collect_all: true,
+                    find_emails: true,
+                    ..crate::models::SearchConfig::default()
+                },
+            };
+            let counts = crate::db::EnrichCounts { leads: 120, read, with_email: 0 };
+            StagesView::new(&summary, None, counts, None)
+        };
+        let stopped_in_maps = job(0);
+        assert_eq!(stopped_in_maps.maps_detail, "2 areas, stopped before all were searched");
+        assert!(!stopped_in_maps.maps_done);
+        let stopped_in_sites = job(30);
+        assert_eq!(stopped_in_sites.maps_detail, "All 2 areas searched");
+        assert_eq!(stopped_in_sites.maps_pct, 100);
+        assert!(stopped_in_sites.maps_done);
     }
 }
 
