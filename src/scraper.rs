@@ -723,6 +723,8 @@ struct Tally {
     checking: AtomicI64,
     /// Results left out because they lay far from the area searched.
     out_of_area: AtomicI64,
+    /// Results left out because they weren't in the category searched.
+    off_category: AtomicI64,
 }
 
 /// Everything a lookup needs, shared across the search.
@@ -996,6 +998,17 @@ async fn run_job_inner(
                 ),
             )?;
         }
+        let off_category = run.tally.off_category.load(Ordering::Relaxed);
+        if off_category > 0 {
+            database.append_event(
+                job_id,
+                "info",
+                &format!(
+                    "Left out {} results in other categories than the one searched",
+                    fmt_number(off_category)
+                ),
+            )?;
+        }
         if !run.enriching || control.is_cancelled() {
             return Ok(());
         }
@@ -1191,6 +1204,7 @@ async fn collect_lookup_pages(run: &Run<'_>, lookup: &Lookup) -> Result<()> {
     let per_lookup =
         (!config.collect_all && config.per_query_limit > 0).then_some(config.per_query_limit);
     let full_page = usize::try_from(MAP_PAGE_SIZE).unwrap_or(20);
+    let category = searched_category(config, &lookup.query);
     let mut page_index = 0;
     while page_index < MAX_PAGES {
         run.control.wait_if_paused().await;
@@ -1226,7 +1240,7 @@ async fn collect_lookup_pages(run: &Run<'_>, lookup: &Lookup) -> Result<()> {
             center = Some(page.center);
             let rows = page.rows;
             let mut batch = Vec::with_capacity(page.places.len());
-            let mut nearby = 0_usize;
+            let mut relevant = 0_usize;
             for record in page.places {
                 // An area Google can't place (a PO-box ZIP, say) gets
                 // results from anywhere; those belong to no area searched.
@@ -1234,7 +1248,13 @@ async fn collect_lookup_pages(run: &Run<'_>, lookup: &Lookup) -> Result<()> {
                     run.tally.out_of_area.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
-                nearby += 1;
+                // Where an area has few businesses of the kind searched,
+                // Google fills the list with whatever else is nearby.
+                if category.is_some_and(|category| !in_category(&record, category)) {
+                    run.tally.off_category.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                relevant += 1;
                 if skipped < config.start_at {
                     skipped += 1;
                     continue;
@@ -1248,9 +1268,9 @@ async fn collect_lookup_pages(run: &Run<'_>, lookup: &Lookup) -> Result<()> {
                 }
             }
             save_batch(run, lookup, batch).await?;
-            // A full page with nothing near the area: later pages only go
-            // farther out.
-            let strayed = rows > 0 && nearby == 0;
+            // A full page with nothing near the area, or nothing of the
+            // kind searched: later pages only go farther out.
+            let strayed = rows > 0 && relevant == 0;
             if per_lookup.is_some_and(|limit| seen >= limit) || rows < full_page || strayed {
                 return Ok(());
             }
@@ -1260,6 +1280,31 @@ async fn collect_lookup_pages(run: &Run<'_>, lookup: &Lookup) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The Google Maps category a text search names, when the query is exactly
+/// one (as the category picker fills it in). Results are then kept only if
+/// Google lists that category for them. Category names are English, so
+/// searches in other languages are left as they are.
+fn searched_category(config: &SearchConfig, query: &str) -> Option<&'static str> {
+    let english = language(config).to_ascii_lowercase().starts_with("en");
+    (matches!(config.mode, SearchMode::Text) && english)
+        .then(|| crate::categories::exact(query.trim().trim_matches('"')))
+        .flatten()
+}
+
+/// Whether Google lists `category` (lower case) among the record's
+/// categories, main or additional.
+fn in_category(record: &BusinessRecord, category: &str) -> bool {
+    let listed = record
+        .extra
+        .get("subtypes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .chain(record.category.as_deref());
+    listed.into_iter().any(|name| name.trim().eq_ignore_ascii_case(category))
 }
 
 /// How far from an area's centre a result may lie and still count, in
@@ -1482,6 +1527,42 @@ mod tests {
         assert_eq!(record.name, "Example Cafe");
         assert_eq!(record.review_count, Some(42));
         assert_eq!(record.source, "google_maps_web");
+    }
+
+    #[test]
+    fn category_searches_keep_only_that_category() {
+        let record = |category: &str, subtypes: &[&str]| BusinessRecord {
+            name: "Example".to_owned(),
+            category: Some(category.to_owned()),
+            address: None,
+            phone: None,
+            website: None,
+            latitude: None,
+            longitude: None,
+            rating: None,
+            review_count: None,
+            status: None,
+            hours: None,
+            maps_url: None,
+            place_id: None,
+            source: "test".to_owned(),
+            extra: serde_json::json!({ "subtypes": subtypes }),
+        };
+        let config = SearchConfig::default();
+        let category = searched_category(&config, "House Cleaning Service").expect("a category");
+        assert!(in_category(&record("House cleaning service", &["House cleaning service"]), category));
+        // Listed as an additional category still counts.
+        assert!(in_category(
+            &record("Janitorial service", &["Janitorial service", "House cleaning service"]),
+            category
+        ));
+        assert!(!in_category(&record("Plumber", &["Plumber"]), category));
+        assert!(!in_category(&record("Cleaning service", &["Cleaning service"]), category));
+
+        // Free text and other languages keep everything Google returns.
+        assert_eq!(searched_category(&config, "cheap cleaners near the beach"), None);
+        let german = SearchConfig { language: "de".to_owned(), ..SearchConfig::default() };
+        assert_eq!(searched_category(&german, "house cleaning service"), None);
     }
 
     #[test]

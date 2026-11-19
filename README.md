@@ -260,11 +260,11 @@ claude mcp add --scope user --transport http localleads https://leads.example.co
 4. Runs LocalLeads as a service that starts on boot (systemd on Linux, launchd on macOS). On Linux it runs as its own unprivileged user in a hardened unit.
 5. Opens ports 80 and 443 in ufw or firewalld if one is on, then prints the address and a one-time setup code.
 
-If ports 80 and 443 are already taken (say by nginx), it tells you what's using them and offers other ports, or putting LocalLeads behind that web server.
+If ports 80 and 443 are already taken (say by nginx), it tells you what's using them and offers other ports, or putting LocalLeads behind that web server. On a [Coolify](https://coolify.io) server it routes Let's Encrypt's check through Coolify's proxy, so the IP still gets a trusted certificate.
 
 | Choice | You get | Needs |
 | --- | --- | --- |
-| **The server's IP** (default on Linux) | `https://203.0.113.7` with a self-signed certificate | Nothing |
+| **The server's IP** (default on Linux) | `https://203.0.113.7` with a Let's Encrypt certificate for the IP, renewed on its own (self-signed if Let's Encrypt can't reach the server) | Nothing |
 | **Your domain** | `https://leads.example.com` with a Let's Encrypt certificate, renewed on its own | A DNS `A` record pointing at the server |
 | **Only this machine** (default on macOS) | `http://localhost:7878` | Nothing |
 | **Behind your own web server** | LocalLeads on `127.0.0.1`, plus a ready-made nginx, Caddy or Apache config to paste in | Your nginx, Traefik, Caddy, ... |
@@ -293,7 +293,7 @@ curl -fsSL https://raw.githubusercontent.com/seczoid/localleads/main/setup.sh | 
 | Option | What it does |
 | --- | --- |
 | `--domain NAME` | Serve at your domain with Let's Encrypt HTTPS (Linux) |
-| `--ip [ADDRESS]` | Serve at the server's IP with a self-signed certificate (Linux) |
+| `--ip [ADDRESS]` | Serve at the server's IP with Let's Encrypt HTTPS for the IP (Linux) |
 | `--local` | Only this machine, at `http://localhost:PORT` |
 | `--proxy URL` | Behind your own web server; `URL` is the address people open |
 | `--port N` | Port LocalLeads listens on, on `127.0.0.1` (default 7878) |

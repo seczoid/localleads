@@ -46,6 +46,14 @@ IP address can use any; a domain needs 80 or 443 for Let's Encrypt) or
 putting LocalLeads behind that web server, with an nginx, Caddy or Apache
 config to paste in.
 
+At an IP address, Caddy gets a Let's Encrypt certificate for the IP itself
+(6-day certificates, renewed on their own), so browsers trust it with no
+domain. Let's Encrypt checks the server on port 80 or 443 first: when
+[Coolify](https://coolify.io)'s proxy holds those, the script adds a route
+(`/data/coolify/proxy/dynamic/localleads-acme.yaml`) that passes only that
+check through to Caddy. When nothing can, Caddy signs its own certificate and
+the browser warns once. IP certificates need Caddy 2.11 or newer.
+
 Run the same command again to update, change settings or uninstall.
 Unattended:
 

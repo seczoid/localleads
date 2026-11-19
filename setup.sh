@@ -31,6 +31,9 @@ CADDY_OWNED="# Managed by LocalLeads setup.sh"
 CADDY_ADDED="# Added by LocalLeads setup.sh"
 CADDY_SITE=/etc/caddy/localleads.caddy
 CADDYFILE=/etc/caddy/Caddyfile
+# Coolify's Traefik reads extra routes from here (see coolify_owns_443).
+COOLIFY_DYNAMIC=/data/coolify/proxy/dynamic
+COOLIFY_ROUTE=$COOLIFY_DYNAMIC/localleads-acme.yaml
 
 # ------------------------------------------------------------ output
 
@@ -277,9 +280,9 @@ settings or uninstall.
 Where it's served (pick one):
   --domain NAME     Your own domain, with HTTPS from Let's Encrypt (Linux).
                     Point its DNS A record at this server first.
-  --ip [ADDRESS]    This server's IP address, with a self-signed
-                    certificate; the browser warns once (Linux). Default on
-                    Linux.
+  --ip [ADDRESS]    This server's IP address, with HTTPS from Let's Encrypt
+                    for the IP itself (a self-signed certificate if it can't
+                    get one) (Linux). Default on Linux.
   --local           Only this machine, at http://localhost:PORT.
                     Default on macOS.
   --proxy URL       Behind your own web server (nginx, Traefik, ...): URL
@@ -304,6 +307,8 @@ EOF
 MODE=""
 DOMAIN=""
 SERVER_IP=""
+IP_CHALLENGES=none
+IP_TRUSTED=0
 PROXY_URL=""
 PORT=""
 HTTP_PORT=""
@@ -520,7 +525,7 @@ configure() {
 			esac
 		else
 			choose 1 \
-				"From anywhere, at this server's IP address ${DIM}(HTTPS with a self-signed certificate; quickest)${RESET}" \
+				"From anywhere, at this server's IP address ${DIM}(HTTPS from Let's Encrypt, no domain needed; quickest)${RESET}" \
 				"From anywhere, at my own domain ${DIM}(HTTPS from Let's Encrypt; needs a DNS record)${RESET}" \
 				"Only on this machine ${DIM}(http://localhost; reach it over an SSH tunnel)${RESET}" \
 				"Behind my own web server ${DIM}(nginx, Traefik, Cloudflare Tunnel, ...)${RESET}"
@@ -679,8 +684,10 @@ check_web_ports() {
 		esac
 	done
 
-	# An IP address with Caddy's own certificate can use any port, as long
-	# as Caddy serves only LocalLeads. Let's Encrypt needs 80 or 443.
+	# An IP address can use any port, as long as Caddy serves only
+	# LocalLeads: its certificate comes through Coolify's proxy when that's
+	# what holds 443 (see ip_challenges), else Caddy signs its own. A domain
+	# needs 80 or 443 for Let's Encrypt.
 	local other_ports=0 new_http=$HTTP_PORT new_https=$HTTPS_PORT
 	if [ "$MODE" = ip ] && caddy_is_ours; then
 		other_ports=1
@@ -733,7 +740,7 @@ summary() {
 	printf '  %-10s %s\n' "Address" "$(public_url)"
 	case $MODE in
 	domain) printf '  %-10s %s\n' "HTTPS" "Let's Encrypt certificate, renewed by Caddy" ;;
-	ip) printf '  %-10s %s\n' "HTTPS" "Self-signed certificate from Caddy (your browser warns once)" ;;
+	ip) printf '  %-10s %s\n' "HTTPS" "Let's Encrypt certificate for the IP (self-signed if it can't get one)" ;;
 	local) printf '  %-10s %s\n' "Reachable" "Only from this machine" ;;
 	proxy) printf '  %-10s %s\n' "Proxy to" "http://127.0.0.1:$PORT" ;;
 	esac
@@ -1067,16 +1074,115 @@ EOF
 	as_root systemctl enable caddy >/dev/null 2>&1
 }
 
+# Caddy gets Let's Encrypt certificates for IP addresses from 2.11 on.
+caddy_ip_certs() {
+	local version major minor
+	version=$(caddy version 2>/dev/null | awk '{print $1}')
+	version=${version#v}
+	major=${version%%.*}
+	minor=${version#*.}
+	minor=${minor%%.*}
+	case "$major$minor" in "" | *[!0-9]*) return 1 ;; esac
+	[ "$major" -gt 2 ] || { [ "$major" = 2 ] && [ "$minor" -ge 11 ]; }
+}
+
+# Coolify's Traefik holds port 443, reads route files from a folder, and
+# can reach this machine as host.docker.internal.
+coolify_owns_443() {
+	as_root test -d "$COOLIFY_DYNAMIC" || return 1
+	command -v docker >/dev/null 2>&1 || return 1
+	as_root docker ps --format '{{.Names}}' 2>/dev/null | grep -qx coolify-proxy || return 1
+	as_root grep -q 'host.docker.internal:host-gateway' "$COOLIFY_DYNAMIC/../docker-compose.yml" 2>/dev/null || return 1
+	[ "$(port_owner 443)" = docker-proxy ]
+}
+
+# The name Let's Encrypt asks for when it checks an IP address over TLS:
+# 203.0.113.7 -> 7.113.0.203.in-addr.arpa
+reverse_dns_name() {
+	printf '%s' "$1" | awk -F. '{printf "%s.%s.%s.%s.in-addr.arpa", $4, $3, $2, $1}'
+}
+
+# How Let's Encrypt can check this server before it certifies its IP
+# address: on port 80 (http), on 443 (tls), both, through Coolify's proxy
+# on 443 (coolify), or not at all (none: Caddy signs its own).
+ip_challenges() {
+	IP_CHALLENGES=none
+	caddy_ip_certs || return 0
+	if [ "$HTTP_PORT" = 80 ] && [ "$HTTPS_PORT" = 443 ]; then
+		IP_CHALLENGES=both
+	elif [ "$HTTP_PORT" = 80 ]; then
+		IP_CHALLENGES=http
+	elif [ "$HTTPS_PORT" = 443 ]; then
+		IP_CHALLENGES=tls
+	elif coolify_owns_443; then
+		IP_CHALLENGES=coolify
+	fi
+}
+
+# Coolify's Traefik passes Let's Encrypt's TLS check for this IP straight
+# through to Caddy, unopened. Nothing else is routed to LocalLeads.
+write_coolify_route() {
+	as_root tee "$COOLIFY_ROUTE" >/dev/null <<EOF
+# LocalLeads, written by setup.sh; it's rewritten when you run it again.
+# Caddy (port $HTTPS_PORT) gets a Let's Encrypt certificate for $SERVER_IP.
+# Traefik owns port 443, so it passes the TLS-ALPN check for that IP (asked
+# for by its reverse-DNS name) through to Caddy untouched.
+tcp:
+  routers:
+    localleads-acme-tls:
+      rule: "HostSNI(\`$(reverse_dns_name "$SERVER_IP")\`)"
+      entryPoints:
+        - https
+      service: localleads-caddy-tls
+      tls:
+        passthrough: true
+  services:
+    localleads-caddy-tls:
+      loadBalancer:
+        servers:
+          - address: "host.docker.internal:$HTTPS_PORT"
+EOF
+	note "Coolify's proxy passes Let's Encrypt's check on to Caddy ($COOLIFY_ROUTE)"
+	# Traefik picks the file up within a second or so.
+	sleep 2
+}
+
 configure_caddy() {
 	step "Setting up HTTPS"
-	local site tls=""
+	local site tls="" disable=""
+	IP_CHALLENGES=none
 	if [ "$MODE" = domain ]; then
 		site="https://$DOMAIN"
 	else
 		site="https://$SERVER_IP"
-		tls="	tls internal
+		ip_challenges
+		case $IP_CHALLENGES in
+		http) disable="
+			disable_tlsalpn_challenge" ;;
+		tls | coolify) disable="
+			disable_http_challenge" ;;
+		esac
+		if [ "$IP_CHALLENGES" = none ]; then
+			tls="	tls internal
 
 "
+		else
+			# Let's Encrypt's 6-day certificates cover IP addresses; Caddy
+			# renews them. If it can't get one, it signs its own.
+			tls="	tls {
+		issuer acme {
+			profile shortlived$disable
+		}
+		issuer internal
+	}
+
+"
+		fi
+	fi
+	if [ "$IP_CHALLENGES" = coolify ]; then
+		write_coolify_route
+	elif as_root test -f "$COOLIFY_ROUTE"; then
+		as_root rm -f "$COOLIFY_ROUTE"
 	fi
 	local redirect=""
 	if [ "$HTTPS_PORT" != 443 ]; then
@@ -1180,6 +1286,7 @@ wait_https() {
 		fi
 		if [ "$code" = 200 ]; then
 			ok "HTTPS works"
+			if [ "$MODE" = ip ] && [ "$IP_CHALLENGES" != none ]; then wait_ip_certificate; fi
 			return
 		fi
 		sleep 2
@@ -1194,8 +1301,29 @@ wait_https() {
 	note "  journalctl -u caddy -n 50 --no-pager"
 }
 
+# Waits for Let's Encrypt's certificate for the IP, checked the way a
+# browser would (Caddy serves its own until then).
+wait_ip_certificate() {
+	note "Waiting for Let's Encrypt's certificate for $SERVER_IP..."
+	local i
+	for i in $(seq 1 30); do
+		if curl -s -o /dev/null --max-time 5 \
+			--connect-to "$SERVER_IP:$HTTPS_PORT:127.0.0.1:$HTTPS_PORT" \
+			"https://$SERVER_IP:$HTTPS_PORT/healthz"; then
+			IP_TRUSTED=1
+			ok "Trusted certificate from Let's Encrypt; Caddy renews it every few days"
+			return
+		fi
+		sleep 2
+	done
+	warn "No Let's Encrypt certificate yet, so Caddy serves its own for now."
+	note "Caddy keeps trying. See what it says with:"
+	note "  journalctl -u caddy -n 50 --no-pager"
+}
+
 # Takes LocalLeads out of Caddy, leaving your own sites alone.
 remove_from_caddy() {
+	as_root rm -f "$COOLIFY_ROUTE" 2>/dev/null || true
 	as_root test -f "$CADDY_SITE" || return 0
 	as_root rm -f "$CADDY_SITE"
 	if [ "$(as_root head -n 1 "$CADDYFILE" 2>/dev/null)" = "$CADDY_OWNED" ]; then
@@ -1333,9 +1461,16 @@ finish() {
 	else
 		say "  Setup code   ${BOLD}$SETUP_CODE${RESET}  ${DIM}(to create your account, the first time)${RESET}"
 	fi
-	if [ "$MODE" = ip ]; then
+	if [ "$MODE" = ip ] && [ "$IP_TRUSTED" != 1 ]; then
 		say ""
 		note "Your browser warns about the certificate because it's self-signed."
+		if [ "$IP_CHALLENGES" = none ]; then
+			if caddy_ip_certs; then
+				note "Let's Encrypt checks an IP address on port 80 or 443, and both are taken."
+			else
+				note "Caddy 2.11 or newer can get a Let's Encrypt certificate for the IP."
+			fi
+		fi
 		note "Choose Advanced → Proceed. For a trusted certificate, point a domain"
 		note "at $SERVER_IP and run this again."
 	fi

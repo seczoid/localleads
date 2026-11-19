@@ -63,6 +63,18 @@ pub fn url() -> &'static str {
     &URL
 }
 
+/// The Google Maps category `query` names exactly (ignoring case), if any.
+pub fn exact(query: &str) -> Option<&'static str> {
+    static NAMES: LazyLock<std::collections::HashMap<String, &'static str>> = LazyLock::new(|| {
+        groups()
+            .iter()
+            .flat_map(|group| group.items.iter())
+            .map(|&item| (item.to_lowercase(), item))
+            .collect()
+    });
+    NAMES.get(query.trim().to_lowercase().as_str()).copied()
+}
+
 /// Categories matching `query`: whole name first, then names starting with
 /// it, then a word starting with it, then containing it; common ones first.
 pub fn search(query: &str, limit: usize) -> Vec<&'static str> {
@@ -142,5 +154,13 @@ mod tests {
         assert!(found.iter().any(|item| *item == "medical laboratory"));
         assert!(found.iter().all(|item| item.contains("med")));
         assert!(search("zzzz", 5).is_empty());
+    }
+
+    #[test]
+    fn exact_finds_whole_category_names_only() {
+        assert_eq!(exact(" House Cleaning Service "), Some("house cleaning service"));
+        assert_eq!(exact("medical spa"), Some("medical spa"));
+        assert_eq!(exact("house cleaning"), None);
+        assert_eq!(exact("emergency plumber near me"), None);
     }
 }
