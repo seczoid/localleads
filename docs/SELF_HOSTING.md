@@ -5,7 +5,7 @@ The included `compose.yaml` puts [Caddy](https://caddyserver.com) in front of
 it, which gets and renews HTTPS certificates from Let's Encrypt on its own.
 
 ```
-internet ──443──▶ caddy (HTTPS, HTTP/3) ──▶ localleads:7878 ──▶ /data/localleads.sqlite
+internet ──443──▶ caddy (HTTPS) ──▶ localleads:7878 ──▶ /data/localleads.sqlite
 ```
 
 ## The quick way: setup.sh
@@ -83,7 +83,7 @@ The rest of this page runs it with Docker instead.
   elsewhere or use a prebuilt image.
 - A domain or subdomain whose DNS `A` (and `AAAA`, if you have IPv6) record
   points at the server.
-- Ports 80 and 443 open (TCP, plus 443/UDP for HTTP/3). Port 80 is only used
+- Ports 80 and 443 open (TCP). Port 80 is only used
   to get certificates and redirect to HTTPS.
 
 ## Start it

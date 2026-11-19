@@ -1,10 +1,17 @@
 # Caddy serves LocalLeads over HTTPS at $DOMAIN, with certificates from
 # Let's Encrypt (or its own local CA for "localhost"). Port 80 only
 # redirects to HTTPS.
-# To get expiry notices from Let's Encrypt, add a global block at the top:
-#   {
-#   	email you@example.com
-#   }
+
+{
+	# HTTP/3 (QUIC, over UDP) is off: with Linux's default UDP buffers it
+	# slows big downloads such as exports to a few hundred KB/s on a
+	# distant server, where HTTP/2 over TCP runs at the line's speed.
+	servers {
+		protocols h1 h2
+	}
+	# To get expiry notices from Let's Encrypt:
+	# email you@example.com
+}
 
 {$DOMAIN} {
 	# Live updates (/events) and MCP (/mcp) stream; don't compress them.

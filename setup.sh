@@ -1216,8 +1216,14 @@ EOF
 	fi
 	if [ "$ours" = 1 ]; then
 		# Caddy serves only LocalLeads: write its Caddyfile, with the global
-		# options LocalLeads needs.
-		local options=""
+		# options LocalLeads needs. HTTP/3 (QUIC, over UDP) is left off: with
+		# Linux's default UDP buffers it slows big downloads such as exports
+		# to a few hundred KB/s on a distant server, where HTTP/2 over TCP
+		# runs at the line's speed.
+		local options="	servers {
+		protocols h1 h2
+	}
+"
 		if [ "$MODE" = ip ]; then
 			# Browsers send no server name for an IP address, so say which
 			# certificate to answer with.
