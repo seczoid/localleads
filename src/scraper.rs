@@ -751,6 +751,12 @@ impl Run<'_> {
         self.tally.collected.load(Ordering::Relaxed) >= self.budget.limit
     }
 
+    /// Stopped by the user or a shutdown, or the lead limit is reached:
+    /// Google Maps lookups end where they are.
+    fn stopped(&self) -> bool {
+        self.control.is_cancelled() || self.limit_reached()
+    }
+
     fn save_progress(&self) -> Result<()> {
         let finished = std::mem::take(
             &mut *self
@@ -981,12 +987,31 @@ async fn run_job_inner(
     // Google Maps first, then the websites: both at once fight over the
     // same connections and slow each other down.
     let work = async {
+        // Once the lead limit is reached (or the search is stopped), no new
+        // area starts; the ones under way stop at once (see wait_stopped).
         stream::iter(lookups)
+            .take_while(|_| futures::future::ready(!run.stopped()))
             .map(|lookup| collect_lookup(&run, lookup))
             .buffer_unordered(concurrency)
             .try_for_each(|()| async { Ok(()) })
             .await?;
         run.save_progress()?;
+        if run.limit_reached() {
+            let done = run.tally.lookups_done.load(Ordering::Relaxed);
+            let total = i64::try_from(run.total_lookups).unwrap_or(i64::MAX);
+            if done < total {
+                database.append_event(
+                    job_id,
+                    "info",
+                    &format!(
+                        "Reached the limit of {} leads after {} of {} areas; the rest weren't searched",
+                        fmt_number(run.budget.limit),
+                        fmt_number(done),
+                        fmt_number(total)
+                    ),
+                )?;
+            }
+        }
         let out_of_area = run.tally.out_of_area.load(Ordering::Relaxed);
         if out_of_area > 0 {
             database.append_event(
@@ -1179,11 +1204,18 @@ async fn wait_cancelled(control: &JobControl) {
     }
 }
 
+async fn wait_stopped(run: &Run<'_>) {
+    while !run.stopped() {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 async fn collect_lookup(run: &Run<'_>, lookup: Lookup) -> Result<()> {
     let result = collect_lookup_pages(run, &lookup).await;
-    // An area cut short by a stop or a shutdown is searched again when the
-    // search is picked up; one that ran to its end (or failed) is not.
-    if result.is_ok() && !run.control.is_cancelled() {
+    // An area cut short by a stop, a shutdown or the lead limit is searched
+    // again when the search is continued; one that ran to its end (or
+    // failed) is not.
+    if matches!(result, Ok(true)) {
         run.tally.lookups_done.fetch_add(1, Ordering::Relaxed);
         run.finished
             .lock()
@@ -1193,7 +1225,9 @@ async fn collect_lookup(run: &Run<'_>, lookup: Lookup) -> Result<()> {
     result.map(|_| ())
 }
 
-async fn collect_lookup_pages(run: &Run<'_>, lookup: &Lookup) -> Result<()> {
+/// Searches one area page by page. Ok(false) when it was cut short (a stop,
+/// a shutdown or the lead limit), so the area counts as not searched yet.
+async fn collect_lookup_pages(run: &Run<'_>, lookup: &Lookup) -> Result<bool> {
     let config = run.config;
     let mut center = lookup.center.map(|(latitude, longitude)| MapCenter {
         latitude,
@@ -1208,8 +1242,8 @@ async fn collect_lookup_pages(run: &Run<'_>, lookup: &Lookup) -> Result<()> {
     let mut page_index = 0;
     while page_index < MAX_PAGES {
         run.control.wait_if_paused().await;
-        if run.control.is_cancelled() || run.limit_reached() {
-            return Ok(());
+        if run.stopped() {
+            return Ok(false);
         }
         // Page 1 alone. A full page 1 means the area likely has more, so
         // pages 2 and 3 are asked for together; later pages one at a time.
@@ -1228,13 +1262,13 @@ async fn collect_lookup_pages(run: &Run<'_>, lookup: &Lookup) -> Result<()> {
             let page = match page {
                 Ok(page) => page,
                 Err(error) => {
-                    if run.control.is_cancelled() {
-                        return Ok(());
+                    if run.stopped() {
+                        return Ok(false);
                     }
                     run.tally.failures.fetch_add(1, Ordering::Relaxed);
                     let message = format!("{} / {}: {error}", lookup.query, lookup.location);
                     let _ = run.database.append_event(run.job_id, "error", &message);
-                    return Ok(());
+                    return Ok(true);
                 }
             };
             center = Some(page.center);
@@ -1272,14 +1306,14 @@ async fn collect_lookup_pages(run: &Run<'_>, lookup: &Lookup) -> Result<()> {
             // kind searched: later pages only go farther out.
             let strayed = rows > 0 && relevant == 0;
             if per_lookup.is_some_and(|limit| seen >= limit) || rows < full_page || strayed {
-                return Ok(());
+                return Ok(true);
             }
-            if run.control.is_cancelled() || run.limit_reached() {
-                return Ok(());
+            if run.stopped() {
+                return Ok(false);
             }
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// The Google Maps category a text search names, when the query is exactly
@@ -1376,26 +1410,30 @@ async fn fetch_with_retries(
     let mut last_error = anyhow::anyhow!("no request attempt was made");
     for attempt in 0..=config.max_retries {
         run.control.wait_if_paused().await;
-        if run.control.is_cancelled() {
-            return Err(anyhow::anyhow!("cancelled"));
+        if run.stopped() {
+            return Err(anyhow::anyhow!("stopped"));
         }
         let proxy = run.pool.select();
         if proxy.is_none() && config.require_proxy && !config.allow_direct {
             return Err(anyhow::anyhow!("no enabled healthy proxy is available"));
         }
         let http = run.clients.get(proxy.as_ref())?;
-        match client
-            .search_page(
-                &http,
-                &lookup.query,
-                &lookup.location,
-                center,
-                lookup.span_m,
-                offset,
-                config,
-            )
-            .await
-        {
+        // A request under way when the limit is reached (or the search is
+        // stopped) is dropped instead of waited for.
+        let request = client.search_page(
+            &http,
+            &lookup.query,
+            &lookup.location,
+            center,
+            lookup.span_m,
+            offset,
+            config,
+        );
+        let outcome = tokio::select! {
+            outcome = request => outcome,
+            () = wait_stopped(run) => return Err(anyhow::anyhow!("stopped")),
+        };
+        match outcome {
             Ok(value) => return Ok(value),
             Err(error) => {
                 let route = proxy.as_ref().map_or_else(
@@ -1407,7 +1445,10 @@ async fn fetch_with_retries(
                     run.pool.mark_failure(&proxy.id);
                 }
                 if attempt < config.max_retries {
-                    tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt + 1))).await;
+                    tokio::select! {
+                        () = tokio::time::sleep(Duration::from_millis(500 * u64::from(attempt + 1))) => {}
+                        () = wait_stopped(run) => return Err(anyhow::anyhow!("stopped")),
+                    }
                 }
             }
         }
@@ -1673,6 +1714,73 @@ mod tests {
         assert_eq!(name_for_emails("Smith & Co."), "Smith & Co.");
     }
 
+
+    #[tokio::test]
+    async fn the_lead_limit_stops_areas_without_marking_them_searched() {
+        let path = std::env::temp_dir().join(format!("localleads-limit-{}.sqlite", uuid::Uuid::new_v4()));
+        let database = Database::open(&path).unwrap();
+        let config = SearchConfig { total_limit: 500, max_retries: 3, ..SearchConfig::default() };
+        let pool = ProxyPool::new(Vec::new());
+        let control = JobControl::new();
+        let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let run = Run {
+            database: &database,
+            job_id: "job",
+            config: &config,
+            pool: &pool,
+            control: &control,
+            events: &events,
+            clients: HttpClients::default(),
+            budget: Budget { limit: 500, reserved: AtomicI64::new(500) },
+            tally: Tally::default(),
+            total_lookups: 3,
+            enriching: false,
+            finished: Mutex::new(Vec::new()),
+            reading_sites: AtomicBool::new(false),
+        };
+        run.tally.collected.store(500, Ordering::Relaxed);
+        let lookup = |location: &str| Lookup {
+            query: "roofing contractor".into(),
+            location: location.into(),
+            center: Some((27.9, -82.4)),
+            span_m: 6000,
+        };
+
+        // Reached: no request is made and the area stays unsearched.
+        let started = std::time::Instant::now();
+        let error = fetch_with_retries(&run, &lookup("Tampa, FL"), None, 0).await.unwrap_err();
+        assert_eq!(error.to_string(), "stopped");
+        collect_lookup(&run, lookup("Tampa, FL")).await.unwrap();
+        assert_eq!(run.tally.lookups_done.load(Ordering::Relaxed), 0);
+        assert!(run.finished.lock().unwrap().is_empty());
+        assert_eq!(run.tally.failures.load(Ordering::Relaxed), 0);
+
+        // Reached while a retry is waiting: it ends at once.
+        run.tally.collected.store(0, Ordering::Relaxed);
+        let stopper = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            run.tally.collected.store(500, Ordering::Relaxed);
+        };
+        let started_wait = std::time::Instant::now();
+        let ((), outcome) = tokio::join!(stopper, async {
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_secs(30)) => false,
+                () = wait_stopped(&run) => true,
+            }
+        });
+        assert!(outcome && started_wait.elapsed() < Duration::from_secs(2));
+
+        // New areas aren't started once it's reached.
+        let started_areas = std::sync::atomic::AtomicUsize::new(0);
+        stream::iter([lookup("A"), lookup("B"), lookup("C")])
+            .take_while(|_| futures::future::ready(!run.stopped()))
+            .for_each(|_| async { started_areas.fetch_add(1, Ordering::Relaxed); })
+            .await;
+        assert_eq!(started_areas.load(Ordering::Relaxed), 0);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(database);
+        let _ = std::fs::remove_file(&path);
+    }
 
     /// `PROXY=socks5h://… cargo test proxy_probe -- --ignored --nocapture`
     #[tokio::test]
