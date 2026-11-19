@@ -8,17 +8,20 @@
 
 A self-hosted lead machine written in Rust. Pick from Google Maps' own business categories, search whole states or countries area by area, read each business's website for emails, socials and phone numbers, rotate through hundreds of checked proxies, and drive all of it from Claude, Codex or Cursor over MCP. One binary, one SQLite file, no API keys, no monthly bill.
 
+[![Website](https://img.shields.io/badge/website-localleads.run-00b368.svg)](https://www.localleads.run/)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-22c55e.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-f74c00.svg?logo=rust)](https://www.rust-lang.org)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ed.svg?logo=docker&logoColor=white)](docs/SELF_HOSTING.md)
 [![MCP](https://img.shields.io/badge/MCP-44_tools-8b5cf6.svg)](#-built-for-ai-agents-mcp)
 [![Docker image](https://github.com/seczoid/localleads/actions/workflows/docker.yml/badge.svg)](https://github.com/seczoid/localleads/actions/workflows/docker.yml)
 
-[Features](#-features) · [Quick start](#-quick-start) · [MCP](#-built-for-ai-agents-mcp) · [Self-hosting](#-self-hosting-with-https) · [Docs](docs/SELF_HOSTING.md)
+**[🌐 localleads.run](https://www.localleads.run/)** · [Features](#-features) · [Quick start](#-quick-start) · [MCP](#-built-for-ai-agents-mcp) · [Self-hosting](#-self-hosting-with-https) · [Docs](docs/SELF_HOSTING.md)
 
 <sub>Proxies we recommend: <a href="https://fas.st/t/R1CJJibL"><b>ProxyScrape</b></a> residential.<br>Affiliate link: signing up through it supports the project at no extra cost to you.</sub>
 
-<img src="docs/images/hero.png" alt="The Searches page with a search running: Google Maps done, websites being read for emails" width="900">
+<a href="https://www.localleads.run/"><img src="docs/images/hero.png" alt="The Searches page with a search running: Google Maps done, websites being read for emails" width="900"></a>
+
+<sub>See every feature, how it compares with Outscraper, Apify and Scrap.io, and the one-line install at <a href="https://www.localleads.run/"><b>www.localleads.run</b></a>.</sub>
 
 </div>
 
